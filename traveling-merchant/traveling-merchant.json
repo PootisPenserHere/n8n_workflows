@@ -1,0 +1,186 @@
+{
+  "name": "traveling-merchant",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [
+        460,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 18,
+              "minute": 1
+            }
+          ]
+        }
+      },
+      "name": "Cron",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        460,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://runescape.wiki/api.php?action=parse&disablelimitreport=1&format=json&prop=text&text={{Travelling+Merchant/api|format=json}}",
+        "options": {}
+      },
+      "name": "wiki-data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        860,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json[\"PERSONAL_TELEGRAM_ID\"]}}",
+        "text": "=The daily stock for the traveling merchant is: \n{{$json[\"notification_message\"]}}",
+        "additionalFields": {}
+      },
+      "name": "Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "@laziness_rocks_dev_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "for (item of items) {\n  html_in_json = item.json.raw_daily_stock\n  let dailyStock = JSON.parse(html_in_json.replace(/(<([^>]+)>)/gi, \"\"));\n  \n  let notificationMessage = ''; \n  for (stock of dailyStock.items) {\n    notificationMessage = `${notificationMessage}\\nX${stock.quantity} ${stock.name}`\n  }\n  \n  item.json.notification_message = notificationMessage;\n}\n\nconsole.log('Done!');\n\nreturn items;"
+      },
+      "name": "create-message-base",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "echo $PERSONAL_TELEGRAM_ID"
+      },
+      "name": "read PERSONAL_TELEGRAM_ID",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "raw_daily_stock",
+              "value": "={{$json[\"parse\"][\"text\"][\"*\"]}}"
+            },
+            {
+              "name": "PERSONAL_TELEGRAM_ID",
+              "value": "={{$node[\"read PERSONAL_TELEGRAM_ID\"].json[\"stdout\"]}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Set",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Cron": {
+      "main": [
+        [
+          {
+            "node": "read PERSONAL_TELEGRAM_ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "read PERSONAL_TELEGRAM_ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wiki-data": {
+      "main": [
+        [
+          {
+            "node": "Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create-message-base": {
+      "main": [
+        [
+          {
+            "node": "Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read PERSONAL_TELEGRAM_ID": {
+      "main": [
+        [
+          {
+            "node": "wiki-data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set": {
+      "main": [
+        [
+          {
+            "node": "create-message-base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "id": 1
+}
