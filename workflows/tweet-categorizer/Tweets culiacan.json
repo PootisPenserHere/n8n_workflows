@@ -1,0 +1,307 @@
+{
+  "name": "Tweets culiacan",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/10 * * * *"
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        4064,
+        112
+      ],
+      "id": "7263dd8c-e981-4b08-8dce-2a0594993670"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ⬇️ PASTE YOUR NITTER RSS LINK HERE ⬇️\nreturn [\n  {\n    json: {\n      rss_url: 'http://srv-captain--nitter-hidden:8080/search/rss?f=tweets&q=culiacan&e-quote=on&e-replies=on&e-nativeretweets=on'\n    }\n  }\n];"
+      },
+      "name": "Configuration (Set URL)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4288,
+        112
+      ],
+      "id": "5e4064af-bfe9-41ed-9056-109ec20fbdb9"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst rawUrl = item.rss_url;\n\nif (!rawUrl) {\n  throw new Error(\"rss_url is missing from input\");\n}\n\nconst cleanUrl = rawUrl.trim();\n\n// 1. Manually Extract Hostname\nlet host = 'unknown-host';\ntry {\n    const protocolSplit = cleanUrl.split('://');\n    const afterProtocol = protocolSplit.length > 1 ? protocolSplit[1] : protocolSplit[0];\n    host = afterProtocol.split('/')[0];\n} catch (e) {}\n\n// 2. Manually Extract Query Parameters\nconst params = {};\ntry {\n    const querySplit = cleanUrl.split('?');\n    if (querySplit.length > 1) {\n        const queryString = querySplit[1];\n        const pairs = queryString.split('&');\n        \n        pairs.forEach(pair => {\n            const parts = pair.split('=');\n            if (parts.length >= 2) {\n                const key = parts[0];\n                const val = decodeURIComponent(parts[1] || ''); \n                params[key] = val;\n            }\n        });\n    }\n} catch (e) {}\n\n// 3. Separate 'q' (Query)\nconst searchQuery = params['q'] || 'Unknown';\nif (params['q']) delete params['q'];\n\nreturn {\n  json: {\n    full_url: cleanUrl,\n    host_name: host,\n    search_query: searchQuery,\n    filters: JSON.stringify(params)\n  }\n};"
+      },
+      "name": "Extract Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4512,
+        112
+      ],
+      "id": "69ad891d-edc2-499e-a00c-4e994d5c63f3"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nitter_app.searches (full_url, host_name, search_query, filters, last_run_at)\nVALUES ($1, $2, $3, $4, NOW())\nON CONFLICT (full_url) \nDO UPDATE SET last_run_at = NOW(), filters = $4, host_name = $2\nRETURNING id;",
+        "options": {
+          "queryReplacement": "=$1={{ $json.full_url }}\n$2={{ $json.host_name }}\n$3={{ $json.search_query }}\n$4={{ $json.filters }}"
+        }
+      },
+      "name": "Register Search",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        4736,
+        112
+      ],
+      "id": "30ea477c-95c9-4b21-8908-154c63cc04f9",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Configuration (Set URL)').item.json.rss_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "name": "Fetch HTTP RSS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4944,
+        112
+      ],
+      "id": "cf603be7-3705-4d2f-87ee-cac074963391",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the Raw XML String from the HTTP node\nconst xml = $input.item.json.data;\n\nif (!xml) {\n  throw new Error(\"No Data returned from HTTP Request\");\n}\n\ntry {\n  // Get the Search ID from the DB Registration step\n  // Wrapping this in try/catch or optional chaining is recommended in case input is improper\n  const searchNode = $('Register Search').first();\n  const searchId = searchNode ? searchNode.json.id : null;\n\n  // Helper to extract value between tags\n  function getTagValue(text, tagName) {\n    // Note: In new RegExp(\"string\"), we DO use double backslashes \\\\s\n    const regex = new RegExp(`<${tagName}[^>]*>([\\\\s\\\\S]*?)<\\\\/${tagName}>`, 'i');\n    const match = text.match(regex);\n    if (!match) return null;\n    \n    let val = match[1];\n    // Remove CDATA tags if they exist\n    val = val.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '');\n    return val.trim();\n  }\n\n  const tweets = [];\n\n  // Split the XML by <item> tags to isolate each tweet\n  const items = xml.split('<item>');\n\n  // Start at index 1 because index 0 is the RSS header info\n  for (let i = 1; i < items.length; i++) {\n      // Ensure we stop at </item>\n      const itemContent = items[i].split('</item>')[0];\n      \n      tweets.push({\n          json: {\n              search_id: searchId,\n              nitter_guid: getTagValue(itemContent, 'guid'),\n              // FIX: Use getTagValue with the specific XML namespace tag\n              // We check dc:creator first, fall back to author\n              author_handle: getTagValue(itemContent, 'dc:creator') || getTagValue(itemContent, 'author'),\n              title: getTagValue(itemContent, 'title'),\n              content_html: getTagValue(itemContent, 'description'),\n              tweet_link: getTagValue(itemContent, 'link'),\n              published_at: getTagValue(itemContent, 'pubDate')\n          }\n      });\n  }\n\n  return tweets;\n} catch (e) {\n  throw new Error(\"XML Parsing Failed: \" + e.message);\n}"
+      },
+      "name": "Parse XML to JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5168,
+        112
+      ],
+      "id": "62217f04-be54-4a64-9f9d-c47c18aef7a1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nitter_app.tweets \n(search_id, nitter_guid, author_handle, content_html, tweet_link, published_at)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (nitter_guid, search_id) DO NOTHING;",
+        "options": {
+          "queryReplacement": "=$1={{ $json.search_id }}\n$2={{ $json.nitter_guid }}\n$3={{ $json.author_handle }}\n$4={{ $json.content_html }}\n$5={{ $json.tweet_link }}\n$6={{ $json.published_at }}"
+        }
+      },
+      "name": "Save Tweets",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        5392,
+        112
+      ],
+      "id": "78c0048e-3494-44cb-a4a8-0fcb6706780a",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItem = $input.item;\nconst errorData = inputItem.error || inputItem.json || {};\nlet contextUrl = 'Unknown URL';\ntry {\n    contextUrl = $('Configuration (Set URL)').item.json.rss_url;\n} catch(e) {}\n\nlet errorMessage = 'Unknown error';\nlet errorDetails = '';\n\nif (errorData.message) {\n  errorMessage = errorData.message;\n  if (errorData.description) {\n      errorDetails = `\\n\\nDetails: ${errorData.description}`;\n  }\n} else if (typeof errorData === 'string') {\n    errorMessage = errorData;\n} else {\n    errorMessage = JSON.stringify(errorData);\n}\n\n// Helper to escape HTML characters so Telegram doesn't crash\nfunction escapeHtml(unsafe) {\n    if (!unsafe) return '';\n    return unsafe\n         .replace(/&/g, \"&amp;\")\n         .replace(/</g, \"&lt;\")\n         .replace(/>/g, \"&gt;\");\n}\n\nconst safeMsg = escapeHtml(errorMessage + errorDetails);\nconst safeNode = escapeHtml($input.item.triggerNode || 'Unknown');\n\nreturn {\n  json: {\n    // We use HTML formatting here. <a href=\"...\"> is supported.\n    // <pre> allows us to dump the error message safely without breaking formatting.\n    message: `⚠️ <b>Nitter Ingestion Failed</b>\\n\\n` +\n             `<b>Node Failed:</b> ${safeNode}\\n` +\n             `<b>Target:</b> <a href=\"${contextUrl}\">RSS Feed</a>\\n` +\n             `<b>Error:</b>\\n<pre>${safeMsg}</pre>`\n  }\n};"
+      },
+      "name": "Format Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4944,
+        384
+      ],
+      "id": "1b38e23b-3fef-4c10-a7b7-4ea5e3491a6a"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT data FROM key_value_store WHERE name = 'PERSONAL_TELEGRAM_CHAT_ID'",
+        "options": {}
+      },
+      "name": "Get Telegram Chat ID for Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        5168,
+        384
+      ],
+      "id": "b76f0ec4-c829-4c5f-b420-9d4c68afbd36",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.data }}",
+        "text": "={{ $('Format Error Message').item.json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        5392,
+        384
+      ],
+      "id": "1a2bdf49-15e7-4883-947e-1ab49399e3ff",
+      "webhookId": "06d44aa2-64d9-4233-9cbf-a2565a1531fb",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration (Set URL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (Set URL)": {
+      "main": [
+        [
+          {
+            "node": "Extract Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Metadata": {
+      "main": [
+        [
+          {
+            "node": "Register Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Search": {
+      "main": [
+        [
+          {
+            "node": "Fetch HTTP RSS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch HTTP RSS": {
+      "main": [
+        [
+          {
+            "node": "Parse XML to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse XML to JSON": {
+      "main": [
+        [
+          {
+            "node": "Save Tweets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "Get Telegram Chat ID for Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Telegram Chat ID for Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e209690b-4e31-4124-87c8-8d08cccb509a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "1jT6Vp8qaMBddwLq",
+  "tags": []
+}

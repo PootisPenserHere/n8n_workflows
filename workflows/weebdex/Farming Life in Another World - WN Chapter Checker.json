@@ -1,0 +1,400 @@
+{
+  "name": "Farming Life in Another World - WN Chapter Checker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -3872,
+        464
+      ],
+      "id": "17e8692d-0108-44e0-8b1c-5b4e72a11f1d",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      url: 'https://api.scrapingant.com/v2/general?url=https%3A%2F%2Fwww.shmtranslations.com%2Fongoing%2Ffarming-life-in-another-world%2F&x-api-key=934fe2a7f548433f8735f04b77ef8da2&return_page_source=true',\n      originalUrl: 'https://www.shmtranslations.com/ongoing/farming-life-in-another-world/',\n      uniqueName: 'farming_life_another_world_latest_chapter'\n    }\n  }\n];"
+      },
+      "name": "Set Variables",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3664,
+        464
+      ],
+      "id": "0ce7a88d-7340-4bf4-b429-e1d805f67cd2"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "name": "Fetch Chapter Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        -3472,
+        464
+      ],
+      "id": "c0927738-f35a-4d58-a31c-5f9646d81ebd",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const html = $input.item.json.data || $input.item.json;\nconst url = $('Set Variables').item.json.url;\nconst originalUrl = $('Set Variables').item.json.originalUrl;\n\ntry {\n  // Look for the latest chapter link\n  // Pattern captures: href, Chapter Number, and Title\n  // Matches: <a href=\"URL\" ...>Chapter 1000 – Title</a>\n  const chapterPattern = /<a href=\"([^\"]+)\"[^>]*>\\s*Chapter\\s*(\\d+)\\s*[–-]\\s*(.*?)<\\/a>/g;\n  const matches = [...html.matchAll(chapterPattern)];\n  \n  if (matches.length === 0) {\n    throw new Error('No chapter numbers found in HTML');\n  }\n  \n  // Get all chapter numbers and find the maximum\n  let latestChapter = 0;\n  let chapterName = '';\n  let chapterUrl = '';\n  \n  for (const match of matches) {\n    const num = parseInt(match[2]); // Capture group 2 is the number\n    if (num > latestChapter) {\n      latestChapter = num;\n      chapterName = match[3].trim(); // Capture group 3 is the name\n      chapterUrl = match[1]; // Capture group 1 is the URL\n    }\n  }\n  \n  if (isNaN(latestChapter) || latestChapter <= 0) {\n    throw new Error('Invalid chapter number extracted: ' + latestChapter);\n  }\n  \n  return {\n    json: {\n      latestChapter: latestChapter,\n      chapterName: chapterName,\n      chapterUrl: chapterUrl,\n      url: url,\n      originalUrl: originalUrl,\n      uniqueName: $('Set Variables').item.json.uniqueName\n    }\n  };\n  \n} catch (error) {\n  throw new Error('Failed to parse chapter number: ' + error.message + '\\n\\nHTML preview: ' + html.substring(0, 500));\n}"
+      },
+      "name": "Extract Latest Chapter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3168,
+        464
+      ],
+      "id": "4d845aa8-f58d-4477-a525-d13c2499a0b5",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT data FROM key_value_store WHERE name = '{{ $json.uniqueName }}'",
+        "options": {}
+      },
+      "name": "Get Stored Chapter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -2976,
+        464
+      ],
+      "id": "7da961a2-417d-4046-b0b8-d5e9b3aeff41",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const currentChapter = $('Extract Latest Chapter').item.json.latestChapter;\nconst chapterName = $('Extract Latest Chapter').item.json.chapterName;\nconst chapterUrl = $('Extract Latest Chapter').item.json.chapterUrl;\nconst dbResult = $('Get Stored Chapter').item.json;\nconst uniqueName = $('Extract Latest Chapter').item.json.uniqueName;\nconst url = $('Extract Latest Chapter').item.json.url;\nconst originalUrl = $('Extract Latest Chapter').item.json.originalUrl;\n\nlet storedChapter = null;\nlet isNewChapter = false;\n\n// Check if database query was successful and returned data\nif (dbResult && dbResult.data) {\n  // Row exists in database - data is directly in dbResult.data\n  try {\n    storedChapter = parseInt(dbResult.data);\n    // Only mark as new if current chapter is GREATER than stored\n    isNewChapter = currentChapter > storedChapter;\n    console.log(`Stored: ${storedChapter}, Current: ${currentChapter}, IsNew: ${isNewChapter}`);\n  } catch (e) {\n    console.log('Could not parse stored chapter, treating as new');\n    isNewChapter = true;\n  }\n} else {\n  // Row doesn't exist or query failed - assume current chapter is new\n  console.log('No stored chapter found, treating current chapter as new');\n  isNewChapter = true;\n}\n\nreturn {\n  json: {\n    currentChapter: currentChapter,\n    chapterName: chapterName,\n    chapterUrl: chapterUrl,\n    storedChapter: storedChapter,\n    isNewChapter: isNewChapter,\n    uniqueName: uniqueName,\n    url: url,\n    originalUrl: originalUrl\n  }\n};"
+      },
+      "name": "Compare Chapters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2768,
+        464
+      ],
+      "id": "635e3e4f-8fd3-41a4-b9a7-5474451dad37"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isNewChapter }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Check If New Chapter",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -2576,
+        464
+      ],
+      "id": "144f9bf5-31d1-44a9-b51c-acf95456a1a6"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT data FROM key_value_store WHERE name = 'PERSONAL_TELEGRAM_CHAT_ID'",
+        "options": {}
+      },
+      "name": "Get Telegram Chat ID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -2368,
+        352
+      ],
+      "id": "eaab472c-3e81-43da-94d3-7100defd2a2c",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.data }}",
+        "text": "=🎉 *New Chapter Available!*\n\n📖 *Farming Life in Another World*\n\n*Chapter {{ $('Compare Chapters').item.json.currentChapter }} – {{ $('Compare Chapters').item.json.chapterName }}*\n{{ $('Compare Chapters').item.json.storedChapter ? '_(Previous: Chapter ' + $('Compare Chapters').item.json.storedChapter + ')_' : '_(First time checking)_' }}\n\n🔗 [Read Now]({{ $('Compare Chapters').item.json.chapterUrl }})",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        -2160,
+        352
+      ],
+      "id": "f30aca03-ba5b-435c-87c6-7ad7bcaf30f4",
+      "webhookId": "fa35ed29-af90-448d-95ca-2e5c55121a10",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO key_value_store (name, data) VALUES ('{{ $('Compare Chapters').item.json.uniqueName }}', '{{ $('Compare Chapters').item.json.currentChapter }}') ON CONFLICT (name) DO UPDATE SET data = '{{ $('Compare Chapters').item.json.currentChapter }}'",
+        "options": {}
+      },
+      "name": "Update Stored Chapter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1968,
+        352
+      ],
+      "id": "8024da5a-0217-45a5-b519-a31a0a04ce13",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const error = $input.item.json.error || $input.item.json;\nconst nodeName = $runIndex === 0 ? 'Fetch Chapter Page' : 'Extract Latest Chapter';\n\nlet errorMessage = 'Unknown error';\nlet errorDetails = '';\n\nif (typeof error === 'object') {\n  errorMessage = error.message || JSON.stringify(error);\n  if (error.description) {\n    errorDetails = '\\n\\nDetails: ' + error.description;\n  }\n} else {\n  errorMessage = String(error);\n}\n\nreturn {\n  json: {\n    message: '⚠️ *Error: Failed to Check Chapter*\\n\\n' +\n             '*Novel:* Farming Life in Another World\\n' +\n             '*Error in:* ' + nodeName + '\\n' +\n             '*Message:* ' + errorMessage + errorDetails +\n             '\\n\\n_Please check the workflow manually._'\n  }\n};"
+      },
+      "name": "Format Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3168,
+        656
+      ],
+      "id": "ccbe35a8-1be9-4805-aab0-ec1419a30ebb"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT data FROM key_value_store WHERE name = 'PERSONAL_TELEGRAM_CHAT_ID'",
+        "options": {}
+      },
+      "name": "Get Telegram Chat ID for Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -2976,
+        656
+      ],
+      "id": "d7b02c34-1dde-4bc9-8371-ff54fb17b08f",
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.data }}",
+        "text": "={{ $('Format Error Message').item.json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        -2768,
+        656
+      ],
+      "id": "1671204e-69cf-4fec-ad17-ec4553fe0881",
+      "webhookId": "06d44aa2-64d9-4233-9cbf-a2565a1531fb",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Variables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Variables": {
+      "main": [
+        [
+          {
+            "node": "Fetch Chapter Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Chapter Page": {
+      "main": [
+        [
+          {
+            "node": "Extract Latest Chapter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Latest Chapter": {
+      "main": [
+        [
+          {
+            "node": "Get Stored Chapter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Stored Chapter": {
+      "main": [
+        [
+          {
+            "node": "Compare Chapters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare Chapters": {
+      "main": [
+        [
+          {
+            "node": "Check If New Chapter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If New Chapter": {
+      "main": [
+        [
+          {
+            "node": "Get Telegram Chat ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Telegram Chat ID": {
+      "main": [
+        [
+          {
+            "node": "Send Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Notification": {
+      "main": [
+        [
+          {
+            "node": "Update Stored Chapter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "Get Telegram Chat ID for Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Telegram Chat ID for Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "758babe2-1743-4e16-ac50-d9b3e79c8499",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "KHUv4jUR5kwqRWr9",
+  "tags": []
+}

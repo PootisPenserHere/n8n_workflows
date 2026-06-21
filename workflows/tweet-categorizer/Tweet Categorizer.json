@@ -1,0 +1,587 @@
+{
+  "name": "Tweet Categorizer",
+  "nodes": [
+    {
+      "parameters": {
+        "values": {
+          "boolean": [
+            {
+              "name": "bypass_10k_limit"
+            }
+          ],
+          "string": [
+            {
+              "name": "model_name",
+              "value": "mistralai/mistral-nemo"
+            }
+          ],
+          "number": [
+            {
+              "name": "batch_size",
+              "value": 1000
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1d476463-a27e-45ec-ac72-822a42088710",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -1328,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT name, data FROM key_value_store WHERE name IN ('OPENROUTER_AUTOMATION_API_KEY', 'PERSONAL_TELEGRAM_CHAT_ID')",
+        "options": {}
+      },
+      "id": "93138819-545f-4a9b-bfcf-cc8538525481",
+      "name": "Get Secrets",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1104,
+        192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const secrets = $input.all();\nconst apiKey = secrets.find(x => x.json.name === 'OPENROUTER_AUTOMATION_API_KEY')?.json.data;\nconst chatId = secrets.find(x => x.json.name === 'PERSONAL_TELEGRAM_CHAT_ID')?.json.data;\nconst config = $('Configuration').first().json;\n\nreturn {\n  json: {\n    api_key: apiKey,\n    chat_id: chatId,\n    ...config\n  }\n};"
+      },
+      "id": "f609f564-9a0d-4022-8d20-049280a56c10",
+      "name": "Format Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nitter_app.llm_models (model_name) VALUES ($1) ON CONFLICT (model_name) DO UPDATE SET model_name = EXCLUDED.model_name RETURNING id",
+        "options": {
+          "queryReplacement": "=$1={{ $json.model_name }}"
+        }
+      },
+      "id": "b13d3514-52de-456c-9692-c2183ae4d0e9",
+      "name": "Get/Register Model ID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -656,
+        192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as count FROM nitter_app.tweets t LEFT JOIN nitter_app.tweet_categorizations c ON t.id = c.tweet_id AND c.model_id = $1 WHERE c.id IS NULL",
+        "options": {
+          "queryReplacement": "=$1={{ $json.id }}"
+        }
+      },
+      "id": "2975bc05-dd43-45af-bf95-f7b884dbb7c1",
+      "name": "Count Uncategorized",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -448,
+        192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ parseInt($json.count) }}",
+              "operation": "larger",
+              "value2": 10000
+            }
+          ],
+          "boolean": [
+            {
+              "value1": "={{ $('Format Config').item.json.bypass_10k_limit }}"
+            }
+          ]
+        },
+        "combineOperation": "AND"
+      },
+      "id": "11b1103f-8c8b-4773-856c-f0ab09bf7ac6",
+      "name": "Over 10k Limit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Format Config').item.json.chat_id }}",
+        "text": "=⚠️ **Workflow Stopped: Too Many Pending Tweets**\n\nThere are {{ $json.count }} uncategorized tweets. Safety limit is 10,000.\nTo process anyway, set `bypass_10k_limit` to true in 'Configuration'.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "148ee8c7-9541-423d-9e52-27dce626b1fc",
+      "name": "Alert Telegram (Stop)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "14f1e16a-f3b4-4c0b-a5af-051bb3b1db61",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT t.id as tweet_id, t.content_html, t.nitter_guid FROM nitter_app.tweets t LEFT JOIN nitter_app.tweet_categorizations c ON t.id = c.tweet_id AND c.model_id = $1 WHERE c.id IS NULL ORDER BY t.published_at DESC LIMIT $2",
+        "options": {
+          "queryReplacement": "=$1={{ $('Get/Register Model ID').item.json.id }}\n$2={{ $('Format Config').item.json.batch_size }}"
+        }
+      },
+      "id": "501bd02a-6365-484f-9065-8b4de28f16bb",
+      "name": "Fetch Batch of Tweets",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        0,
+        368
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "2dabf4f8-5492-4de7-9674-937b2433601e",
+      "name": "Process One by One",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        224,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const htmlText = $input.item.json.content_html || '';\nconst cleanText = htmlText.replace(/<[^>]*>?/gm, ' ').replace(/\\s+/g, ' ').trim();\nconst modelName = $('Format Config').item.json.model_name;\n\nconst prompt = `You are an expert content classifier for social media, specifically Twitter (X). Your context is a Spanish-speaking user base (primarily Mexico), though tweets may occasionally be in English.\n\nYour task is to analyze a single tweet and output a JSON object containing the detected language and a list of applicable categories.\n\n### OUTPUT FORMAT\nReturn ONLY valid JSON. Do not include markdown formatting.\n{\n  \"language\": \"String (Spanish, English, or Other)\",\n  \"categories\": [\"CATEGORY_STRING_1\", \"CATEGORY_STRING_2\"]\n}\n\n### LANGUAGE RULES\n- Detect the language of the tweet.\n- Valid values: \"Spanish\", \"English\", \"Other\".\n- If the tweet uses \"Spanglish\", categorize it as \"Spanish\".\n\n### CATEGORY DEFINITIONS\nEvaluate the tweet against the following categories. A tweet may belong to multiple categories (e.g., a political event could be both POLITICS and NEWS_GENERAL). If it fits none, use NO_CATEGORY.\n\n1. NEWS_GENERAL\n   - Reports on current events, crime, accidents, traffic reports, celebrity gossip (weddings, breakups), or viral stories that would appear on a news broadcast.\n   - Exclude sports unless it is a major breaking headline.\n\n2. WEATHER\n   - Mentions availability of rain, droughts, heatwaves, temperature updates, earthquakes (seismic alerts), or hurricanes.\n\n3. SOCIAL_EVENTS\n   - Announcements of public gatherings, concerts, festivals, cinema premieres, exhibitions, or cultural activities.\n   - \"Things to do\" in the city.\n\n4. PROMOTION\n   - Advertising, brand promos, sales, discounts, or influencers clearly selling a product.\n\n5. SCAMS_AND_CRYPTO\n   - Cryptocurrency discussions, NFTs, \"get rich quick\" schemes, phishing attempts, or suspicious bot-like links.\n\n6. POLITICS\n   - Any discussion regarding government, laws, international relations, or elections.\n   - **Context (Mexico):** Mentions of parties (MORENA, PAN, PRI, PRD, MC/Movimiento Ciudadano, PT, PVEM). Mentions of figures (AMLO/López Obrador, Claudia Sheinbaum, Xóchitl Gálvez, Samuel García, Marcelo Ebrard).\n   - **Context (USA):** Mentions of Joe Biden, Donald Trump, US borders, migration policies.\n   - **Context (General):** Feminism, protests, social justice movements, labor reform.\n\n7. MEMES_AND_HUMOR\n   - Tweets intended to be funny, sarcastic, or referencing internet culture.\n   - Use of heavy slang, copypastas, or references to viral trends.\n\n8. SPORTS\n   - Discussion of soccer (Liga MX, National Team), F1 (Checo Pérez), Baseball, American Football, or olympics.\n\n9. NO_CATEGORY\n   - For tweets that are personal thoughts (\"I am hungry\"), random conversations that lack context to be understood, greetings, complains, or text that does not carry informational value fitting the categories above.\n\n### EXAMPLES\n\nInput: \"Se pronostican lluvias fuertes en CDMX para hoy en la tarde, tomen precauciones.\"\nOutput: {\"language\": \"Spanish\", \"categories\": [\"WEATHER\", \"NEWS_GENERAL\"]}\n\nInput: \"Vote for the new law regarding crypto regulation! Check this link [link]\"\nOutput: {\"language\": \"English\", \"categories\": [\"SCAMS_AND_CRYPTO\", \"POLITICS\"]}\n\nInput: \"El PRI y el PAN anunciaron su coalición para las próximas elecciones.\"\nOutput: {\"language\": \"Spanish\", \"categories\": [\"POLITICS\", \"NEWS_GENERAL\"]}\n\nInput: \"Vendo boletos para el corona capital, info por DM.\"\nOutput: {\"language\": \"Spanish\", \"categories\": [\"SOCIAL_EVENTS\", \"PROMOTION\"]}\n\nInput: \"Checo Pérez acaba de ganar el segundo lugar en el GP!!\"\nOutput: {\"language\": \"Spanish\", \"categories\": [\"SPORTS\", \"NEWS_GENERAL\"]}\n\nInput: \"Tengo mucha hambre.\"\nOutput: {\"language\": \"Spanish\", \"categories\": [\"NO_CATEGORY\"]}\n\n### INPUT TWEET:\n${cleanText}`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    clean_text: cleanText,\n    request_body: {\n      model: modelName,\n      messages: [\n        { role: \"user\", content: prompt }\n      ]\n    }\n  }\n};"
+      },
+      "id": "809ae554-e62e-4865-aae1-11b744607959",
+      "name": "Prepare Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Format Config').item.json.api_key }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request_body }}",
+        "options": {}
+      },
+      "id": "4d36a590-947b-49ee-8f06-875aa5e21d10",
+      "name": "OpenRouter Inference",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        672,
+        368
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $input.item.error !== undefined }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "e105ae55-f84d-4950-a2d8-3854d73878cc",
+      "name": "Check HTTP Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        880,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json.choices?.[0]?.message?.content || '{}';\nconst sourceTweetId = $('Prepare Prompt').item.json.tweet_id;\nconst modelId = $('Get/Register Model ID').item.json.id;\n\n// Clean Markdown Wrappers (```json ... ```)\nconst regex = /```(?:json)?\\s*([\\s\\S]*?)\\s*```/;\nconst match = response.match(regex);\nconst jsonStr = match ? match[1] : response;\n\ntry {\n  const parsed = JSON.parse(jsonStr);\n  \n  return {\n    json: {\n      tweet_id: sourceTweetId,\n      model_id: modelId,\n      language: parsed.language || 'Unknown',\n      categories: JSON.stringify(parsed.categories || []),\n      metadata: JSON.stringify({\n         attempted_at: new Date().toISOString()\n      })\n    }\n  };\n} catch (e) {\n  throw new Error(`JSON Parse Failed: ${e.message}. Raw: ${jsonStr.substring(0, 50)}...`);\n}"
+      },
+      "id": "d4ed8886-5d6b-4141-a34f-a4db3e3992cb",
+      "name": "Parse & Clean JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        352
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $input.item.error !== undefined }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "cec11978-aec7-4e21-abbb-05ef7aa77834",
+      "name": "Check Parse Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1328,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO nitter_app.tweet_categorizations (tweet_id, model_id, language_result, categories) VALUES ($1, $2, $3, $4) ON CONFLICT (tweet_id, model_id) DO NOTHING",
+        "options": {
+          "queryReplacement": "=$1={{ $json.tweet_id }}\n$2={{ $json.model_id }}\n$3={{ $json.language }}\n$4={{ $json.categories }}"
+        }
+      },
+      "id": "522dc769-5d83-4d6c-b3b8-66e8eebfe11b",
+      "name": "Reflect in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1584,
+        304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Format Config').item.json.chat_id }}",
+        "text": "=❌ **Inference Failed**\n\n**ID:** {{ $('Prepare Prompt').item.json.tweet_id }}\n**Error:** {{ $json.error.message || 'Unknown Error' }}\n\n<pre>{{ $('Prepare Prompt').item.json.clean_text.substring(0, 100) }}...</pre>",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "c4890a9f-84dd-4993-a38d-0673442539ee",
+      "name": "Notify Failure",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        1584,
+        512
+      ],
+      "webhookId": "73da03d9-4dae-4857-a18a-3629952d3069",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "c2167068-9132-4ffd-b58d-b92cbbb965bf",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1536,
+        192
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Get Secrets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Secrets": {
+      "main": [
+        [
+          {
+            "node": "Format Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Config": {
+      "main": [
+        [
+          {
+            "node": "Get/Register Model ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get/Register Model ID": {
+      "main": [
+        [
+          {
+            "node": "Count Uncategorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Uncategorized": {
+      "main": [
+        [
+          {
+            "node": "Over 10k Limit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Over 10k Limit?": {
+      "main": [
+        [
+          {
+            "node": "Alert Telegram (Stop)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Batch of Tweets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Batch of Tweets": {
+      "main": [
+        [
+          {
+            "node": "Process One by One",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process One by One": {
+      "main": [
+        [
+          {
+            "node": "Prepare Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Prompt": {
+      "main": [
+        [
+          {
+            "node": "OpenRouter Inference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Inference": {
+      "main": [
+        [
+          {
+            "node": "Check HTTP Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check HTTP Success": {
+      "main": [
+        [
+          {
+            "node": "Notify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse & Clean JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Parse Success": {
+      "main": [
+        [
+          {
+            "node": "Notify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reflect in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Clean JSON": {
+      "main": [
+        [
+          {
+            "node": "Check Parse Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reflect in DB": {
+      "main": [
+        [
+          {
+            "node": "Process One by One",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Failure": {
+      "main": [
+        [
+          {
+            "node": "Process One by One",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "8b32b684-6acb-4a19-aca4-cdde7f0b77ac",
+  "meta": {
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "6XZAUJ8rXstrfKRR",
+  "tags": []
+}

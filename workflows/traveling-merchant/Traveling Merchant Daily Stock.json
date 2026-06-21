@@ -1,0 +1,240 @@
+{
+  "name": "Traveling Merchant Daily Stock",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "10 17 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        80,
+        0
+      ],
+      "id": "06d63f04-5c28-436d-afee-9a6b37d2e3c6",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "url": "https://runescape.wiki/api.php?action=parse&disablelimitreport=1&format=json&prop=text&text={{Travelling+Merchant/api|format=json}}",
+        "options": {}
+      },
+      "name": "Get Merchant Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        288,
+        0
+      ],
+      "id": "7a1ab9f2-e1ac-4842-9d39-df054fa610e9",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the JSON from the HTML content\nconst rawResponse = $input.item.json;\n\n// Navigate through the response structure\nconst parseData = rawResponse.parse;\nconst textData = parseData.text;\nconst htmlContent = textData['*'];\n\n// Extract JSON string from the HTML (removing HTML entities)\nconst cleanHtml = htmlContent\n  .replace(/&#91;/g, '[')\n  .replace(/&#93;/g, ']');\n\n// Find the JSON data\nconst jsonMatch = cleanHtml.match(/{\\\"items\\\":\\[[\\s\\S]*?\\],\\\"timestamp\\\":\\d+}/);\n\nif (!jsonMatch) {\n  throw new Error('Could not extract merchant data from response');\n}\n\nconst merchantData = JSON.parse(jsonMatch[0]);\n\n// Format the message\nlet message = \"🛒 *The daily stock for the traveling merchant is:*\\n\\n\";\n\nmerchantData.items.forEach(item => {\n  message += `✦ x${item.quantity} ${item.name}\\n`;\n});\n\nmessage += \"\\n_Good luck shopping!_ 🎮\";\n\nreturn {\n  json: {\n    message: message,\n    items: merchantData.items,\n    timestamp: merchantData.timestamp\n  }\n};"
+      },
+      "name": "Parse Merchant Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -16
+      ],
+      "id": "9a57db6c-e9c2-4619-9d79-280d74948a69",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "=687532978",
+        "text": "={{$json.message}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send Telegram Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        -32
+      ],
+      "id": "83159eb7-9ff1-4d97-b25c-d1d1c22e7ba7",
+      "webhookId": "69a57fb8-ddd5-4140-afe7-653ee8763e12",
+      "credentials": {
+        "telegramApi": {
+          "id": "7q73VSYRAPe3rdkU",
+          "name": "laziness_rocks_dev_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  json: {\n    message: \"⚠️ *Error: Failed to Get Merchant Data*\\n\\nThere was an error retrieving the traveling merchant stock from the API.\\n\\n_Please try again later or check manually._ 😔\"\n  }\n};"
+      },
+      "name": "Format API Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        176
+      ],
+      "id": "1008725a-465d-4b63-8399-ee0e8b736124"
+    },
+    {
+      "parameters": {
+        "chatId": "=687532978",
+        "text": "={{$json.message}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send API Error Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        304,
+        336
+      ],
+      "id": "43da911b-bb29-4814-8dab-b4d674b833ff",
+      "webhookId": "239f38a2-49e8-4126-b310-ce1fc13448aa",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  json: {\n    message: \"⚠️ *Error: Failed to Parse Merchant Data*\\n\\nThere was an error processing the traveling merchant stock data.\\n\\n_Please try again later or check manually._ 😔\"\n  }\n};"
+      },
+      "name": "Format Parse Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        176
+      ],
+      "id": "6a6eb69d-5d36-4214-befe-e79b2d736ef7"
+    },
+    {
+      "parameters": {
+        "chatId": "=687532978",
+        "text": "={{$json.message}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send Parse Error Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        656,
+        336
+      ],
+      "id": "d3abebb4-981d-4ef7-b203-53168fda5320",
+      "webhookId": "5a52867d-1ab1-4093-9d09-8816a357aea6",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Merchant Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Merchant Data": {
+      "main": [
+        [
+          {
+            "node": "Parse Merchant Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format API Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Merchant Data": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Parse Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format API Error": {
+      "main": [
+        [
+          {
+            "node": "Send API Error Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Parse Error": {
+      "main": [
+        [
+          {
+            "node": "Send Parse Error Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "6222de67-4517-4211-b2e6-ac1c05edd7b7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "90i9nglGyJMzwqoc",
+  "tags": []
+}

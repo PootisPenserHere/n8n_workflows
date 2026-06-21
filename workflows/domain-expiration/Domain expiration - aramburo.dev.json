@@ -1,0 +1,424 @@
+{
+  "name": "Domain expiration - aramburo.dev",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 1 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Schedule - Daily 1AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1328,
+        208
+      ],
+      "id": "a5b20792-20cb-4e4f-8e40-4ee64ef77e63"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "domain",
+              "value": "aramburo.dev"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Set Domain Variable",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        -1120,
+        208
+      ],
+      "id": "76eaf865-0446-4b0d-8a28-0a0c94187d4f"
+    },
+    {
+      "parameters": {
+        "url": "=http://srv-captain--selenium-service:8000/v1/icann/lookup?domain={{ $json.domain }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "Fetch WHOIS Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -928,
+        208
+      ],
+      "id": "d14a493f-5fa1-4172-ab7f-83cdc7fb4597",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract expiration date from ICANN API response\nconst html = $input.first().json.data;\n\n// Get the domain directly from the 'Set Domain Variable' node to ensure it persists\nconst domain = $('Set Domain Variable').item.json.domain;\n\n// Look for the expiration date in the Registry Expiration span\nconst expirationMatch = html.match(/<span class=\"date registry-expiration\">\\s*([^<]+)\\s*<\\/span>/);\n\nif (!expirationMatch) {\n  throw new Error('Could not find expiration date in ICANN response');\n}\n\nconst expiresDateStr = expirationMatch[1].trim();\n\n// Parse the date (format: YYYY-MM-DD HH:MM:SS UTC)\nconst expiresDate = new Date(expiresDateStr);\n\nif (isNaN(expiresDate.getTime())) {\n  throw new Error(`Invalid expiration date format: ${expiresDateStr}`);\n}\n\n// Calculate days until expiration\nconst now = new Date();\nconst timeDiff = expiresDate.getTime() - now.getTime();\nconst daysUntilExpiration = Math.floor(timeDiff / (1000 * 60 * 60 * 24));\n\n// Ensure minimum is 0\nconst daysLeft = Math.max(0, daysUntilExpiration);\n\nreturn {\n  domain: domain,\n  expirationDate: expiresDateStr,\n  expirationDateParsed: expiresDate.toISOString(),\n  daysUntilExpiration: daysLeft,\n  currentDate: now.toISOString()\n};"
+      },
+      "name": "Parse Expiration Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        208
+      ],
+      "id": "54f28735-234d-4bdb-ab2b-8d03d4da7432",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.daysUntilExpiration }}",
+              "operation": "equal",
+              "value2": 60
+            }
+          ]
+        }
+      },
+      "name": "Check 60 Days",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        -144
+      ],
+      "id": "63f3b725-46de-46d9-a345-48154c08c06b"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.daysUntilExpiration }}",
+              "operation": "equal",
+              "value2": 30
+            }
+          ]
+        }
+      },
+      "name": "Check 30 Days",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        96
+      ],
+      "id": "306b7bf7-7090-4920-a4ce-ae6e509904db"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.daysUntilExpiration }}",
+              "operation": "equal",
+              "value2": 15
+            }
+          ]
+        }
+      },
+      "name": "Check 15 Days",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        304
+      ],
+      "id": "5eb897ea-0dbe-4dae-ae0a-527a1d800e3c"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.daysUntilExpiration }}",
+              "operation": "smallerEqual",
+              "value2": 10
+            }
+          ]
+        }
+      },
+      "name": "Check 10 Days or Less",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        496
+      ],
+      "id": "13d565ed-0268-47c7-803f-8f16a1af772a"
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=⚠️ Domain Expiration Alert - 60 Days\n\n🌐 Domain: {{ $json.domain }}\n📅 Expiration Date: {{ $json.expirationDate }}\n⏰ Days Until Expiration: {{ $json.daysUntilExpiration }}\n\nYour domain will expire in exactly 60 days. Consider renewing soon.",
+        "additionalFields": {}
+      },
+      "name": "Telegram - 60 Days",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        -160
+      ],
+      "id": "0a5f76b5-eded-4f11-a5ff-08462a32f437",
+      "webhookId": "e332c758-8376-4509-9678-8db899c725d4",
+      "credentials": {
+        "telegramApi": {
+          "id": "RYCLrpQ9LwpU2KB8",
+          "name": "laziness_rocks_devops_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=⚠️ Domain Expiration Alert - 30 Days\n\n🌐 Domain: {{ $json.domain }}\n📅 Expiration Date: {{ $json.expirationDate }}\n⏰ Days Until Expiration: {{ $json.daysUntilExpiration }}\n\n⚠️ Your domain will expire in 30 days. Please renew immediately!",
+        "additionalFields": {}
+      },
+      "name": "Telegram - 30 Days",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        80
+      ],
+      "id": "a708f32c-3252-4486-b984-521ab67789b3",
+      "webhookId": "463c40f3-7ece-48d2-96f7-51dc7861a307",
+      "credentials": {
+        "telegramApi": {
+          "id": "RYCLrpQ9LwpU2KB8",
+          "name": "laziness_rocks_devops_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=🚨 Domain Expiration Alert - 15 Days\n\n🌐 Domain: {{ $json.domain }}\n📅 Expiration Date: {{ $json.expirationDate }}\n⏰ Days Until Expiration: {{ $json.daysUntilExpiration }}\n\n🚨 URGENT: Your domain will expire in 15 days. Renew NOW!",
+        "additionalFields": {}
+      },
+      "name": "Telegram - 15 Days",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        288
+      ],
+      "id": "16d2c29f-aafa-421c-a4df-b01219983253",
+      "webhookId": "a193f585-27bc-4b93-b9e6-5fd0a0f9af26",
+      "credentials": {
+        "telegramApi": {
+          "id": "RYCLrpQ9LwpU2KB8",
+          "name": "laziness_rocks_devops_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=🔴 CRITICAL - Domain Expiration Alert\n\n🌐 Domain: {{ $json.domain }}\n📅 Expiration Date: {{ $json.expirationDate }}\n⏰ Days Until Expiration: {{ $json.daysUntilExpiration }}\n\n🔴 CRITICAL: Your domain expires in {{ $json.daysUntilExpiration }} days or less!\nRENEW IMMEDIATELY to avoid losing your domain!",
+        "additionalFields": {}
+      },
+      "name": "Telegram - 10 Days or Less",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        480
+      ],
+      "id": "d0d16946-4087-47a1-b91a-10fc1d978fb2",
+      "webhookId": "48ee826f-4916-424d-bac3-849a80546050",
+      "credentials": {
+        "telegramApi": {
+          "id": "RYCLrpQ9LwpU2KB8",
+          "name": "laziness_rocks_devops_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=❌ Date Parsing Error\n\n🌐 Domain: {{ $('Set Domain Variable').item.json.domain }}\n⚠️ Error Type: Failed to Parse Expiration Date\n\n📝 Error Details:\n{{ $json.error.message }}\n\n🔍 Possible causes:\n- Expiration date not found in ICANN response\n- Changed HTML structure on who.is\n- Domain may not have an expiration date (e.g., reserved domains)\n- Invalid date format\n\nManual verification required.",
+        "additionalFields": {}
+      },
+      "name": "Telegram - Parse Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        352
+      ],
+      "id": "3825d0db-3bf1-40cc-83fb-30ac97ff0ced",
+      "webhookId": "79af0284-4791-428e-97fa-d580c6ebc684",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "687532978",
+        "text": "=❌ ICANN Request Error\n\n🌐 Domain: {{ $('Set Domain Variable').item.json.domain }}\n⚠️ Error Type: HTTP Request Failed\n\n📝 Error Details:\n{{ $json.error.message }}\n\n🔍 Possible causes:\n- Network connectivity issues\n- who.is service unavailable\n- Invalid domain name\n- Rate limiting\n\nPlease check the domain and try again later.",
+        "additionalFields": {}
+      },
+      "name": "Telegram - ICANN Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        -928,
+        352
+      ],
+      "id": "7d31cd89-3964-4fb6-a6c5-358cad632660",
+      "webhookId": "a9a45bba-726d-43a5-8950-41aed016c0f5",
+      "credentials": {
+        "telegramApi": {
+          "id": "PMeL0b3z47aL0tYX",
+          "name": "laziness_rocks_noficiations_bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule - Daily 1AM": {
+      "main": [
+        [
+          {
+            "node": "Set Domain Variable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Domain Variable": {
+      "main": [
+        [
+          {
+            "node": "Fetch WHOIS Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch WHOIS Data": {
+      "main": [
+        [
+          {
+            "node": "Parse Expiration Date",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - ICANN Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Expiration Date": {
+      "main": [
+        [
+          {
+            "node": "Check 60 Days",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check 30 Days",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check 15 Days",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check 10 Days or Less",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram - Parse Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check 60 Days": {
+      "main": [
+        [
+          {
+            "node": "Telegram - 60 Days",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check 30 Days": {
+      "main": [
+        [
+          {
+            "node": "Telegram - 30 Days",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check 15 Days": {
+      "main": [
+        [
+          {
+            "node": "Telegram - 15 Days",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check 10 Days or Less": {
+      "main": [
+        [
+          {
+            "node": "Telegram - 10 Days or Less",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f803c969-7420-403f-ae63-abce4ce42b22",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "1szxcBfYHK4Lq75g",
+  "tags": []
+}
