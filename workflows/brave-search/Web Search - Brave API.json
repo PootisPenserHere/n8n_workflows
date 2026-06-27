@@ -1,32 +1,32 @@
 {
-  "name": "Web Search - Brave API",
+  "name": "Web Search - Brave API + Reader",
   "nodes": [
     {
       "parameters": {
         "inputSource": "jsonExample",
-        "jsonExample": "{\n  \"query\": \"n8n execute sub-workflow trigger input data\",\n  \"count\": 5,\n  \"country\": \"US\",\n  \"search_lang\": \"en\",\n  \"ui_lang\": \"en-US\",\n  \"freshness\": \"\",\n  \"safesearch\": \"moderate\"\n}"
+        "jsonExample": "{\n  \"query\": \"n8n execute sub-workflow trigger input data\",\n  \"count\": 10,\n  \"readTopN\": 3,\n  \"readerDelaySeconds\": 4,\n  \"maxContentChars\": 6000,\n  \"country\": \"US\",\n  \"search_lang\": \"en\",\n  \"ui_lang\": \"en-US\",\n  \"freshness\": \"\",\n  \"safesearch\": \"moderate\"\n}"
       },
-      "id": "19befe45-92d4-42c5-9a04-d5e250809161",
+      "id": "383985fe-f558-4756-b573-91a3bb8aae0d",
       "name": "When Executed by Another Workflow",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        -624,
-        512
+        -1632,
+        752
       ],
-      "notes": "Input contract for caller workflows. Required: query. Optional: count, country, search_lang, ui_lang, freshness, safesearch."
+      "notes": "Input contract for caller workflows. Required: query. Optional: count, readTopN, readerDelaySeconds, maxContentChars, country, search_lang, ui_lang, freshness, safesearch."
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.item.json || {};\n\nconst rawQuery = input.query ?? input.q ?? input.searchQuery;\nif (typeof rawQuery !== 'string' || !rawQuery.trim()) {\n  throw new Error('Missing required input field: query');\n}\n\nconst parseInteger = (value, fallback) => {\n  const parsed = parseInt(value, 10);\n  return Number.isFinite(parsed) ? parsed : fallback;\n};\n\nconst clamp = (value, min, max) => Math.min(max, Math.max(min, value));\nconst normalizeString = (value, fallback) => {\n  if (typeof value !== 'string') return fallback;\n  const trimmed = value.trim();\n  return trimmed || fallback;\n};\n\nconst safesearchAllowed = new Set(['off', 'moderate', 'strict']);\nconst freshnessAllowed = new Set(['', 'pd', 'pw', 'pm', 'py']);\n\nconst count = clamp(parseInteger(input.count ?? input.limit, 5), 1, 20);\nconst safesearchInput = normalizeString(input.safesearch, 'moderate');\nconst freshnessInput = normalizeString(input.freshness, '');\n\nreturn {\n  json: {\n    query: rawQuery.trim(),\n    count,\n    country: normalizeString(input.country, 'US').toUpperCase(),\n    search_lang: normalizeString(input.search_lang ?? input.searchLang, 'en'),\n    ui_lang: normalizeString(input.ui_lang ?? input.uiLang, 'en-US'),\n    safesearch: safesearchAllowed.has(safesearchInput) ? safesearchInput : 'moderate',\n    freshness: freshnessAllowed.has(freshnessInput) || /^\\d{4}-\\d{2}-\\d{2}to\\d{4}-\\d{2}-\\d{2}$/.test(freshnessInput)\n      ? freshnessInput\n      : '',\n    requestedAt: new Date().toISOString()\n  }\n};"
+        "jsCode": "const input = $input.item.json || {};\n\nconst rawQuery = input.query ?? input.q ?? input.searchQuery;\nif (typeof rawQuery !== 'string' || !rawQuery.trim()) {\n  throw new Error('Missing required input field: query');\n}\n\nconst parseInteger = (value, fallback) => {\n  const parsed = parseInt(value, 10);\n  return Number.isFinite(parsed) ? parsed : fallback;\n};\n\nconst clamp = (value, min, max) => Math.min(max, Math.max(min, value));\nconst normalizeString = (value, fallback) => {\n  if (typeof value !== 'string') return fallback;\n  const trimmed = value.trim();\n  return trimmed || fallback;\n};\n\nconst safesearchAllowed = new Set(['off', 'moderate', 'strict']);\nconst freshnessAllowed = new Set(['', 'pd', 'pw', 'pm', 'py']);\n\nconst count = clamp(parseInteger(input.count ?? input.limit, 10), 1, 20);\nconst readTopN = clamp(parseInteger(input.readTopN ?? input.read_top_n ?? input.readerLimit, 3), 0, 5);\nconst readerDelaySeconds = clamp(parseInteger(input.readerDelaySeconds ?? input.reader_delay_seconds, 4), 1, 60);\nconst maxContentChars = clamp(parseInteger(input.maxContentChars ?? input.max_content_chars, 6000), 1000, 50000);\n\nconst safesearchInput = normalizeString(input.safesearch, 'moderate');\nconst freshnessInput = normalizeString(input.freshness, '');\n\nreturn {\n  json: {\n    query: rawQuery.trim(),\n    count,\n    readTopN,\n    readerDelaySeconds,\n    maxContentChars,\n    country: normalizeString(input.country, 'US').toUpperCase(),\n    search_lang: normalizeString(input.search_lang ?? input.searchLang, 'en'),\n    ui_lang: normalizeString(input.ui_lang ?? input.uiLang, 'en-US'),\n    safesearch: safesearchAllowed.has(safesearchInput) ? safesearchInput : 'moderate',\n    freshness: freshnessAllowed.has(freshnessInput) || /^\\d{4}-\\d{2}-\\d{2}to\\d{4}-\\d{2}-\\d{2}$/.test(freshnessInput)\n      ? freshnessInput\n      : '',\n    requestedAt: new Date().toISOString()\n  }\n};"
       },
-      "id": "d77b77e1-e5eb-445d-9358-3258d7a12842",
+      "id": "6b762644-59e5-4327-ad53-ada4375aa229",
       "name": "Normalize Input",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -384,
-        512
+        -1392,
+        752
       ],
       "onError": "continueErrorOutput"
     },
@@ -106,13 +106,13 @@
           "timeout": 30000
         }
       },
-      "id": "1e7b7b61-9e7b-42a9-be31-3d436a4611d6",
+      "id": "6ebe7bf7-33c3-4856-a933-b68a826997aa",
       "name": "Brave Web Search",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -144,
-        512
+        -1152,
+        752
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -121,48 +121,213 @@
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "Create an HTTP Header Auth credential named 'Brave Search API'. Header Name: X-Subscription-Token. Header Value: your Brave Search API key."
+      "notes": "Uses an HTTP Header Auth credential. Header Name: X-Subscription-Token. Header Value: your Brave Search API key. Re-select your local credential after import if n8n shows a credential ID warning."
     },
     {
       "parameters": {
-        "jsCode": "const brave = $input.item.json || {};\nconst request = $('Normalize Input').first().json;\nconst webResults = Array.isArray(brave.web?.results) ? brave.web.results : [];\n\nconst records = webResults.slice(0, request.count).map((result, index) => ({\n  rank: index + 1,\n  title: result.title || '',\n  url: result.url || '',\n  description: result.description || '',\n  age: result.age || null,\n  pageAge: result.page_age || null,\n  language: result.language || null,\n  familyFriendly: typeof result.family_friendly === 'boolean' ? result.family_friendly : null,\n  extraSnippets: Array.isArray(result.extra_snippets) ? result.extra_snippets : [],\n  profile: result.profile\n    ? {\n        name: result.profile.name || null,\n        url: result.profile.url || null,\n        longName: result.profile.long_name || null,\n        img: result.profile.img || null,\n      }\n    : null,\n  source: 'brave:web'\n}));\n\nreturn {\n  json: {\n    status: 'ok',\n    provider: 'brave',\n    query: request.query,\n    recordCount: records.length,\n    records,\n    request,\n    metadata: {\n      braveType: brave.type || null,\n      alteredQuery: brave.query?.altered || null,\n      spellcheckOff: brave.query?.spellcheck_off || null,\n      hasNews: Boolean(brave.news?.results?.length),\n      hasVideos: Boolean(brave.videos?.results?.length),\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
+        "jsCode": "const brave = $input.item.json || {};\nconst request = $('Normalize Input').first().json;\nconst webResults = Array.isArray(brave.web?.results) ? brave.web.results : [];\n\nconst normalizeUrlKey = (url) => String(url || '').trim().replace(/\\/$/, '');\nconst seenUrls = new Set();\nconst candidates = [];\n\nfor (const result of webResults) {\n  const url = String(result.url || '').trim();\n  if (!url) continue;\n\n  const key = normalizeUrlKey(url);\n  if (seenUrls.has(key)) continue;\n  seenUrls.add(key);\n\n  candidates.push({\n    rank: candidates.length + 1,\n    title: result.title || '',\n    url,\n    description: result.description || '',\n    age: result.age || null,\n    pageAge: result.page_age || null,\n    language: result.language || null,\n    familyFriendly: typeof result.family_friendly === 'boolean' ? result.family_friendly : null,\n    extraSnippets: Array.isArray(result.extra_snippets) ? result.extra_snippets : [],\n    profile: result.profile\n      ? {\n          name: result.profile.name || null,\n          url: result.profile.url || null,\n          longName: result.profile.long_name || null,\n          img: result.profile.img || null,\n        }\n      : null,\n    source: 'brave:web'\n  });\n\n  if (candidates.length >= request.count) break;\n}\n\nconst readCount = Math.min(request.readTopN, candidates.length);\n\nif (candidates.length === 0 || readCount === 0) {\n  return {\n    json: {\n      emptyResult: true,\n      request: {\n        ...request,\n        candidateCount: candidates.length,\n        readCount\n      },\n      candidateCount: candidates.length,\n      readCount,\n      record: null,\n      readerUrl: null\n    }\n  };\n}\n\nreturn candidates.slice(0, readCount).map((record, index) => ({\n  json: {\n    request: {\n      ...request,\n      candidateCount: candidates.length,\n      readCount\n    },\n    candidateCount: candidates.length,\n    readCount,\n    record: {\n      ...record,\n      readerRank: index + 1\n    },\n    readerUrl: `https://r.jina.ai/${record.url}`\n  }\n}));"
       },
-      "id": "e5a51add-bf05-4b63-8765-ddb565550ca4",
-      "name": "Format Search Response",
+      "id": "769aba58-9a5c-4aa4-a4a4-2e1a9a093f84",
+      "name": "Build Reader Queue",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        128,
-        432
+        -880,
+        672
       ]
     },
     {
       "parameters": {
-        "jsCode": "let request = {};\ntry {\n  request = $('Normalize Input').first().json;\n} catch (error) {\n  request = $input.item.json || {};\n}\n\nconst input = $input.item.json || {};\nconst error = input.error || input;\n\nreturn {\n  json: {\n    status: 'error',\n    provider: 'brave',\n    query: request.query || input.query || null,\n    recordCount: 0,\n    records: [],\n    error: {\n      message: error.message || input.message || 'Search workflow failed before producing results',\n      name: error.name || input.name || null,\n    },\n    request,\n    receivedAt: new Date().toISOString()\n  }\n};"
+        "options": {}
       },
-      "id": "736b1825-79eb-4c3c-8be0-587a50d8f5df",
+      "id": "6c68b81a-cb54-4d2a-aa8e-22a9781be1bc",
+      "name": "Loop Over Reader URLs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -624,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4b32b019-2b73-4cfc-a3a2-7e3daa5771cc",
+              "leftValue": "={{ Boolean($json.readerUrl) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "faa307f7-c321-4ea2-9288-a8df7e286acc",
+      "name": "Has Reader URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -368,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.readerUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "text/plain"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "2a3b3a51-b79f-4347-93da-c370fffab91d",
+      "name": "Jina Reader",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -112,
+        656
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Free/no-key Reader path. Reads the current result URL using https://r.jina.ai/<target-url>."
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('Loop Over Reader URLs').item.json;\nconst response = $input.item.json || {};\n\nlet content = '';\nif (typeof response === 'string') {\n  content = response;\n} else if (typeof response.data === 'string') {\n  content = response.data;\n} else if (typeof response.body === 'string') {\n  content = response.body;\n} else {\n  content = JSON.stringify(response);\n}\n\nconst maxContentChars = source.request.maxContentChars || 6000;\nconst originalContentChars = content.length;\nconst truncatedContent = content.slice(0, maxContentChars);\n\nreturn {\n  json: {\n    ...source,\n    record: {\n      ...source.record,\n      reader: {\n        status: 'ok',\n        fetched: true,\n        provider: 'jina_reader',\n        readerUrl: source.readerUrl,\n        contentType: 'markdown',\n        contentChars: truncatedContent.length,\n        originalContentChars,\n        truncated: originalContentChars > maxContentChars,\n        content: truncatedContent\n      }\n    },\n    processedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "ed7e4af1-2356-40de-8340-c2191eda244d",
+      "name": "Attach Reader Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('Loop Over Reader URLs').item.json;\nconst input = $input.item.json || {};\nconst error = input.error || input;\n\nreturn {\n  json: {\n    ...source,\n    record: {\n      ...source.record,\n      reader: {\n        status: 'error',\n        fetched: false,\n        provider: 'jina_reader',\n        readerUrl: source.readerUrl,\n        error: {\n          message: error.message || input.message || 'Jina Reader request failed',\n          name: error.name || input.name || null\n        }\n      }\n    },\n    processedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "bdd2587c-b7a8-4795-90e8-52221d879416",
+      "name": "Attach Reader Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        736
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $input.item.json || {};\n\nif (source.emptyResult) {\n  return {\n    json: {\n      ...source,\n      processedAt: new Date().toISOString()\n    }\n  };\n}\n\nreturn {\n  json: {\n    ...source,\n    record: {\n      ...source.record,\n      reader: {\n        status: 'skipped',\n        fetched: false,\n        provider: 'jina_reader',\n        reason: 'readerUrl_missing_or_readTopN_zero'\n      }\n    },\n    processedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "2e0b9da5-db26-4948-8d51-d7537e617cfd",
+      "name": "Mark Reader Skipped",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -112,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.request.readerDelaySeconds || 4 }}"
+      },
+      "id": "de70976d-e4dc-46a8-bd08-32676124b793",
+      "name": "Wait Between Reader Calls",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        736
+      ],
+      "webhookId": "0e11ed39-f085-41ed-a0e5-8fd3c266c024"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map((item) => item.json || {});\nconst first = items[0] || {};\nconst request = first.request || {};\n\nconst records = items\n  .filter((item) => item.record && !item.emptyResult)\n  .map((item) => item.record)\n  .sort((a, b) => (a.rank || 0) - (b.rank || 0));\n\nconst readerStats = records.reduce((stats, record) => {\n  const status = record.reader?.status || 'missing';\n  stats[status] = (stats[status] || 0) + 1;\n  return stats;\n}, {});\n\nreturn {\n  json: {\n    status: 'ok',\n    provider: 'brave+jina_reader',\n    query: request.query || null,\n    candidateCount: request.candidateCount ?? first.candidateCount ?? records.length,\n    recordCount: records.length,\n    records,\n    request,\n    metadata: {\n      braveCountRequested: request.count ?? null,\n      readTopN: request.readTopN ?? null,\n      readCount: request.readCount ?? records.length,\n      readerDelaySeconds: request.readerDelaySeconds ?? null,\n      maxContentChars: request.maxContentChars ?? null,\n      readerStats,\n      strategy: 'brave_overretrieve_then_jina_reader_top_n',\n      reranker: 'not_enabled_yet'\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "d201fb73-e655-43c7-80d7-e0dfb8420c43",
+      "name": "Format Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "let request = {};\ntry {\n  request = $('Normalize Input').first().json;\n} catch (error) {\n  request = $input.item.json || {};\n}\n\nconst input = $input.item.json || {};\nconst error = input.error || input;\n\nreturn {\n  json: {\n    status: 'error',\n    provider: 'brave+jina_reader',\n    query: request.query || input.query || null,\n    candidateCount: 0,\n    recordCount: 0,\n    records: [],\n    error: {\n      message: error.message || input.message || 'Search workflow failed before producing results',\n      name: error.name || input.name || null,\n    },\n    request,\n    receivedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "a632db02-5555-4700-827e-c277ebe29651",
       "name": "Format Error Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        128,
-        656
+        -880,
+        912
       ]
     },
     {
       "parameters": {
-        "content": "## Brave API credential\nCreate an **HTTP Header Auth** credential named `Brave Search API`.\n\nHeader Name: `X-Subscription-Token`\nHeader Value: your Brave Search API key.\n\nThe HTTP node also sends `Accept: application/json`, `Accept-Encoding: gzip`, and `Cache-Control: no-cache`.",
-        "height": 272,
+        "content": "## Brave credential\nUse an **HTTP Header Auth** credential.\n\nHeader Name: `X-Subscription-Token`\nHeader Value: your Brave Search API key.\n\nAfter import, open **Brave Web Search** and re-select your local credential if needed.",
+        "height": 256,
         "width": 384,
         "color": 5
       },
-      "id": "fdd75d02-ad23-4d20-9a35-324646e298d4",
+      "id": "1b8fe8b2-2e18-4c59-95fb-918b4c963c14",
       "name": "Credential Setup Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -160,
-        176
+        -1216,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Reader controls\nThis version over-retrieves candidates from Brave, then reads only `readTopN` URLs with Jina Reader.\n\nDefaults:\n- `count`: 10 Brave candidates\n- `readTopN`: 3 URLs\n- `readerDelaySeconds`: 4 seconds between Reader calls\n- `maxContentChars`: 6000 chars per page\n\nReranking is intentionally not enabled yet.",
+        "height": 320,
+        "width": 416,
+        "color": 4
+      },
+      "id": "ef20296a-86b6-4f5c-b203-b6d7142d43a1",
+      "name": "Reader Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -368,
+        160
       ]
     }
   ],
@@ -171,7 +336,10 @@
       {
         "json": {
           "query": "n8n execute sub-workflow trigger input data",
-          "count": 5,
+          "count": 10,
+          "readTopN": 3,
+          "readerDelaySeconds": 4,
+          "maxContentChars": 6000,
           "country": "US",
           "search_lang": "en",
           "ui_lang": "en-US",
@@ -215,7 +383,7 @@
       "main": [
         [
           {
-            "node": "Format Search Response",
+            "node": "Build Reader Queue",
             "type": "main",
             "index": 0
           }
@@ -228,15 +396,124 @@
           }
         ]
       ]
+    },
+    "Build Reader Queue": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Reader URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Reader URLs": {
+      "main": [
+        [
+          {
+            "node": "Format Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Has Reader URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Reader URL?": {
+      "main": [
+        [
+          {
+            "node": "Jina Reader",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Reader Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jina Reader": {
+      "main": [
+        [
+          {
+            "node": "Attach Reader Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Attach Reader Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Reader Content": {
+      "main": [
+        [
+          {
+            "node": "Wait Between Reader Calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Reader Error": {
+      "main": [
+        [
+          {
+            "node": "Wait Between Reader Calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Reader Skipped": {
+      "main": [
+        [
+          {
+            "node": "Wait Between Reader Calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Between Reader Calls": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Reader URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "7e6d3bb0-a0cf-45c5-9067-b15a73edf38e",
+  "versionId": "49a1498d-57b8-4da9-8628-c6b9ad86688b",
   "meta": {
     "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
   },
