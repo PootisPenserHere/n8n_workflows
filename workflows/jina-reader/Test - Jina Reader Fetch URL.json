@@ -3,26 +3,26 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "8f8a6190-80a7-4310-9012-b3c4e5dba2e0",
+      "id": "70d90014-d262-4096-a645-e48f23a11bb9",
       "name": "When clicking ‘Test workflow’",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        3856,
-        1568
+        4560,
+        1552
       ]
     },
     {
       "parameters": {
-        "jsCode": "return {\n  json: {\n    url: 'https://serper.dev/',\n    maxContentChars: 6000,\n    requestTimeoutMs: 60000,\n    redisRateLimitKey: 'jina_reader:free:rpm',\n    rateLimitMaxRequests: 20,\n    rateLimitWindowSeconds: 60,\n    rateLimitSleepBufferSeconds: 5\n  }\n};"
+        "jsCode": "return {\n  json: {\n    url: 'https://serper.dev/',\n    maxContentChars: 6000,\n    requestTimeoutMs: 60000,\n    redisRateLimitKey: 'jina_reader:free:rpm',\n    rateLimitMaxRequests: 20,\n    rateLimitWindowSeconds: 60,\n    rateLimitSleepBufferSeconds: 5,\n    maxAttempts: 3\n  }\n};"
       },
-      "id": "1ec9f268-c561-49ee-946d-a14e7bf3b91e",
+      "id": "d7be0154-4875-43c2-b26c-084cadb85499",
       "name": "Build Test Reader Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4080,
-        1568
+        4784,
+        1552
       ]
     },
     {
@@ -42,7 +42,8 @@
             "redisRateLimitKey": "={{ $json.redisRateLimitKey }}",
             "rateLimitMaxRequests": "={{ $json.rateLimitMaxRequests }}",
             "rateLimitWindowSeconds": "={{ $json.rateLimitWindowSeconds }}",
-            "rateLimitSleepBufferSeconds": "={{ $json.rateLimitSleepBufferSeconds }}"
+            "rateLimitSleepBufferSeconds": "={{ $json.rateLimitSleepBufferSeconds }}",
+            "maxAttempts": "={{ $json.maxAttempts }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -115,6 +116,16 @@
               "canBeUsedToMatch": true,
               "type": "number",
               "removed": false
+            },
+            {
+              "id": "maxAttempts",
+              "displayName": "maxAttempts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
             }
           ],
           "attemptToConvertTypes": true,
@@ -125,43 +136,43 @@
           "waitForSubWorkflow": true
         }
       },
-      "id": "622fd213-1f2e-4238-9ab9-180a737b65d8",
+      "id": "0a9ed218-f504-47ee-8c30-609ff4cccd77",
       "name": "Call Jina Reader Workflow",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        4320,
-        1568
+        5024,
+        1552
       ],
       "notes": "After importing the main Jina Reader workflow, replace this placeholder workflow ID with the imported main workflow."
     },
     {
       "parameters": {
-        "jsCode": "const response = $input.item.json || {};\n\nreturn {\n  json: {\n    status: response.status,\n    provider: response.provider,\n    url: response.url,\n    readerUrl: response.readerUrl,\n    fetched: response.fetched,\n    contentChars: response.contentChars || 0,\n    originalContentChars: response.originalContentChars || 0,\n    truncated: response.truncated || false,\n    // This is the preferred field downstream callers should use.\n    contentPreview: typeof response.content === 'string' ? response.content.slice(0, 1000) : '',\n    error: response.error || null,\n    rateLimit: response.rateLimit || null,\n    fullResponse: response\n  }\n};"
+        "jsCode": "const response = $input.item.json || {};\n\nreturn {\n  json: {\n    status: response.status,\n    provider: response.provider,\n    url: response.url,\n    readerUrl: response.readerUrl,\n    fetched: response.fetched,\n    contentChars: response.contentChars || 0,\n    originalContentChars: response.originalContentChars || 0,\n    truncated: response.truncated || false,\n    // This is the preferred field downstream callers should use.\n    contentPreview: typeof response.content === 'string' ? response.content.slice(0, 1000) : '',\n    error: response.error || null,\n    retry: response.retry || null,\n    attemptsMade: response.attemptsMade ?? response.retry?.attemptsMade ?? null,\n    maxAttempts: response.maxAttempts ?? response.retry?.maxAttempts ?? null,\n    rateLimit: response.rateLimit || null,\n    fullResponse: response\n  }\n};"
       },
-      "id": "54112555-793c-40e9-86d8-7edc1a92befd",
+      "id": "a0e3223a-0f84-4442-855f-ec6781036e0b",
       "name": "Prepare Test Preview",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4560,
-        1568
+        5264,
+        1552
       ]
     },
     {
       "parameters": {
-        "content": "## Test workflow setup\n1. Import `jina-reader-fetch-url.workflow.v5.json`.\n2. In the main workflow, open **Increment Rate Counter** and re-select your Redis credential.\n3. Save the main workflow.\n4. Import this test workflow.\n5. Open **Call Jina Reader Workflow** and select the imported main workflow.\n6. Run this test manually.\n\nExpected output: `status: ok`, `fetched: true`, a populated top-level `content` field, and `rateLimit.counter <= 20`.",
+        "content": "## Test workflow setup\n1. Import `jina-reader-fetch-url.workflow.v6.json`.\n2. In the main workflow, open **Increment Rate Counter** and re-select your Redis credential.\n3. Save the main workflow.\n4. Import this test workflow.\n5. Open **Call Jina Reader Workflow** and select the imported main workflow.\n6. Run this test manually.\n\nExpected output: `status: ok`, `fetched: true`, a populated top-level `content` field, `rateLimit.counter <= 20`, and `retry.succeededAttempt` showing which attempt worked.\n\nFor failure testing, pass a bad URL path/domain or reduce `requestTimeoutMs`; the final response should include `status: error`, `error`, and `retry.errors[]` with one entry per failed Reader attempt.",
         "height": 360,
         "width": 520,
         "color": 4
       },
-      "id": "58c0407e-27da-4b55-aec6-19a767720468",
+      "id": "c3cb2411-55b2-4714-a3e8-8c8a9b9c7a46",
       "name": "Test Setup Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        3872,
-        1184
+        4576,
+        1168
       ]
     }
   ],
@@ -207,7 +218,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "806a9cdb-8aa5-476d-9623-69b336f71e23",
+  "versionId": "07ee221f-d2dd-4550-9bd9-6e8a475d7be4",
   "meta": {
     "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
   },

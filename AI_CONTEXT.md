@@ -639,3 +639,43 @@ Markdown Content: ...",
 
 - Consider adding an optional credentialed Jina path for higher throughput.
 - Consider a more precise Redis Lua or REST implementation if exact TTL reads are needed later. For this step, the requested behavior is deliberately simple and treats TTL as freshly reset after every increment.
+
+
+### Retry behavior
+
+- v6 adds Reader HTTP retry handling to **Jina Reader - Fetch URL**.
+- `maxAttempts` defaults to `3` and is configurable by caller workflows.
+- Accepted aliases are `maxAttempts`, `max_attempts`, `retryMaxAttempts`, `retry_max_attempts`, `retryCount`, `retry_count`, and `retries`.
+- `maxAttempts` means total Reader HTTP fetch attempts, not additional retries. The first Reader HTTP fetch is attempt `1`.
+- Reader HTTP errors are retried only after the workflow captures the actual error and appends it to `retry.errors[]`.
+- Each retry loops back through Redis rate limiting before making the next Reader HTTP request, so every fetch attempt still increments Redis before the request.
+- Rate-limit waits do not advance `retry.currentAttempt`, because no Reader HTTP fetch was made.
+- If all attempts fail, the workflow returns `status: "error"`, `fetched: false`, top-level `error`, `attemptsMade`, `maxAttempts`, and `retry.errors[]` so caller workflows can detect and debug failure.
+- The error object includes message, name, statusCode, code, description, responseBody when available, stack when available, and a capped `rawPreview`. Avoid returning unlimited raw request/response objects because they may contain sensitive data in other integrations.
+- Normalization errors and Redis credential/connection errors are not retried as Reader HTTP attempts; they return normalized error responses immediately.
+
+Updated input example:
+
+```json
+{
+  "url": "https://serper.dev/",
+  "maxContentChars": 6000,
+  "requestTimeoutMs": 60000,
+  "redisRateLimitKey": "jina_reader:free:rpm",
+  "rateLimitMaxRequests": 20,
+  "rateLimitWindowSeconds": 60,
+  "rateLimitSleepBufferSeconds": 5,
+  "maxAttempts": 3
+}
+```
+
+Updated success metadata strategy:
+
+```text
+single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit_and_retry
+```
+
+### Patch history update
+
+- v5 added Redis simple-counter rate limiting, documented `content` as the preferred downstream markdown key, and preserved the working Brave-style Reader URL construction.
+- v6 adds configurable Reader HTTP retries with actual error propagation through top-level `error` and `retry.errors[]`.
