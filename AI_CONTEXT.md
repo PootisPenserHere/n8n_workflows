@@ -1,14 +1,14 @@
-# AI Reference
+# AI Context
 
 This file is the single repository-level AI context for this n8n workflow collection.
 
-Keep this file in the repository root and update it whenever workflow behavior, input/output contracts, credentials, external API assumptions, or design decisions change. Do not create workflow-specific AI reference files inside workflow directories; directory READMEs should link back to this root file instead.
+Keep this file in the repository root and update it whenever workflow behavior, input/output contracts, credentials, external API assumptions, or design decisions change. Do not create workflow-specific AI context files inside workflow directories; directory READMEs should link back to this root file instead.
 
 ## Repository conventions
 
 - Workflows are stored as exported n8n JSON files under `workflows/<domain>/`.
 - Workflow directory READMEs describe local import/setup/use details.
-- Cross-workflow AI context, research notes, API assumptions, and architectural decisions live only in this root `AI_REFERENCE.md`.
+- Cross-workflow AI context, research notes, API assumptions, and architectural decisions live only in this root `AI_CONTEXT.md`.
 - Do not hard-code secrets in workflow JSON. Use n8n credentials.
 - Imported workflow JSON can contain stale credential IDs or workflow IDs from another n8n instance. After import, reselect credentials and called workflows from the local n8n UI.
 
@@ -19,8 +19,6 @@ Keep this file in the repository root and update it whenever workflow behavior, 
 - `workflows/web-search/README.md`
 - `workflows/web-search/web-search-brave-api-reader.workflow.json`
 - `workflows/web-search/test-web-search-brave-api-reader.workflow.json`
-
-Earlier first-slice files may exist in history or local testing, but the current recommended workflow pair is the `+ Reader` version.
 
 ### Purpose
 
@@ -37,32 +35,31 @@ The current implementation:
 ### Sources used
 
 - n8n Execute Sub-workflow Trigger documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/
-  - Used to confirm the callable workflow starts with **Execute Sub-workflow Trigger / When Executed by Another Workflow**.
+  - Used to confirm callable workflows start with **Execute Sub-workflow Trigger / When Executed by Another Workflow**.
 - n8n Execute Sub-workflow documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/
-  - Used to confirm parent workflows can call the search workflow and wait for the sub-workflow response.
+  - Used to confirm parent workflows can call reusable workflows and wait for the sub-workflow response.
 - n8n HTTP Request node documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
   - Used for Brave and Jina Reader HTTP calls.
 - n8n HTTP Request credentials documentation: https://docs.n8n.io/integrations/builtin/credentials/httprequest/
   - Used for the Brave `X-Subscription-Token` HTTP Header Auth credential.
 - n8n rate-limit documentation: https://docs.n8n.io/integrations/builtin/rate-limits/
-  - Used for the Loop Over Items + Wait approach to avoid bursting Reader requests.
+  - Used for the Loop Over Items + Wait approach to avoid bursting Reader requests in the Brave workflow.
 - n8n Loop Over Items documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/
   - Used for one-URL-at-a-time Reader processing.
 - Jina Reader API documentation: https://jina.ai/reader/
-  - Used to confirm the free Reader endpoint is `https://r.jina.ai/`, the no-key limit is 20 RPM, and URLs can be read by prepending `https://r.jina.ai/` to the target URL.
+  - Used to confirm the free Reader endpoint is `https://r.jina.ai/`, the no-key Reader limit is 20 RPM, and URLs can be read by prepending `https://r.jina.ai/` to the target URL.
 - Brave Web Search API reference: https://api-dashboard.search.brave.com/api-reference/web/search/get
   - Used to confirm `GET https://api.search.brave.com/res/v1/web/search`, the required `q` parameter, `count` limits, `freshness`, `result_filter`, and the `X-Subscription-Token` header.
 
 ### Business decisions
 
-- The current reusable workflow is named **Web Search - Brave API + Reader**.
+- The reusable workflow is named **Web Search - Brave API + Reader**.
 - It is designed to be called by other workflows through **Execute Sub-workflow / Execute Workflow**.
 - The companion workflow **Test - Web Search Brave API + Reader** exists only for manual testing and smoke checks.
-- This iteration intentionally does not add a true reranker yet.
 - The current strategy is: over-retrieve from Brave, dedupe URLs, then read only the top `readTopN` URLs using Jina Reader.
+- The workflow uses Brave ranking as the first-pass ordering and does not use a dedicated reranker yet.
 - Reader calls are rate-controlled with **Loop Over Items** batch size 1 plus **Wait Between Reader Calls**.
 - Brave API key must remain in n8n credentials, never in workflow JSON.
-- The Jina Reader integration currently uses the free no-key endpoint. Keep request volume low and add a credentialed Jina path later only if needed.
 - Error responses should avoid returning raw request/response objects that may contain credentials or sensitive headers.
 
 ### Credential requirements
@@ -86,7 +83,7 @@ After importing the workflow, open the **Brave Web Search** HTTP Request node an
 
 ### Input contract
 
-The main workflow accepts one input item with this JSON shape:
+The workflow accepts one input item with this JSON shape:
 
 ```json
 {
@@ -203,7 +200,7 @@ If the workflow fails before producing records, it returns a normalized error re
 ### Rate-limit assumptions
 
 - Jina Reader free no-key endpoint should be treated conservatively.
-- Current default: `readTopN: 3` and `readerDelaySeconds: 4`.
+- Current Brave workflow default: `readTopN: 3` and `readerDelaySeconds: 4`.
 - Keep `readTopN` small when using the free endpoint.
 - Prefer increasing Brave `count` first and keeping Reader enrichment between `3` and `5` URLs.
 
@@ -232,7 +229,7 @@ Brave returns up to 20 candidates
 - Consider adding a credentialed Jina path if higher Reader throughput or Jina Reranker is needed.
 - Preserve the current callable workflow contract as much as possible so existing parent workflows do not break.
 
-## Standalone Jina Reader workflow - Fetch URL
+## Jina Reader workflow - Fetch URL
 
 ### Current files
 
@@ -242,186 +239,60 @@ Brave returns up to 20 candidates
 
 ### Purpose
 
-The standalone Jina Reader workflow is a reusable callable workflow that other n8n workflows can use when they already have a URL and only need page content. It is intentionally separate from the Brave search workflow, which performs search first and then enriches selected search results with Reader content.
-
-This first slice intentionally stays small:
-
-1. Receives one URL from another workflow.
-2. Normalizes and validates the URL.
-3. Fetches page content through `https://r.jina.ai/<target-url>`.
-4. Returns either a normalized success response with markdown content or a normalized error response.
+**Jina Reader - Fetch URL** is a reusable callable workflow for parent n8n workflows that already have a URL and need Reader-converted page content. It does not search the web. It accepts one URL, applies a shared Redis-backed rate limit, retries transient Reader HTTP failures, and returns normalized markdown content or a normalized error object.
 
 ### Sources used
 
 - Jina Reader API documentation: https://jina.ai/reader/
-  - Used to confirm the free/no-key Reader pattern of prepending `https://r.jina.ai/` to the target URL.
+  - Used to confirm the Reader endpoint is `https://r.jina.ai/`, URLs are read by prepending `https://r.jina.ai/` to the target URL, and the free/no-key Reader limit is 20 RPM.
 - n8n Execute Sub-workflow Trigger documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/
   - Used to keep the workflow callable by other workflows.
 - n8n Execute Sub-workflow documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/
-  - Used to confirm the companion test workflow can call the reusable workflow and wait for the sub-workflow response.
+  - Used to confirm parent workflows and the companion test workflow can call the reusable workflow and wait for the response.
 - n8n HTTP Request node documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
   - Used for the Jina Reader HTTP call.
+- n8n Redis node documentation: https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.redis/
+  - Used for the Redis increment counter. The Redis node can atomically increment a key and create it if missing.
+- n8n Redis node source: https://github.com/n8n-io/n8n/blob/master/packages/nodes-base/nodes/Redis/Redis.node.ts
+  - Used to confirm the Redis node's increment operation can apply expiration/TTL after increment.
+- n8n Wait node documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/
+  - Used to confirm Wait can pause executions and that waits shorter than 65 seconds are not offloaded to the database.
 
 ### Business decisions
 
 - The reusable workflow is named **Jina Reader - Fetch URL**.
 - It is designed to be called by other workflows through **Execute Sub-workflow / Execute Workflow**.
-- The companion workflow **Test - Jina Reader Fetch URL** exists only for manual testing and smoke checks.
+- The companion workflow **Test - Jina Reader Fetch URL** exists only for manual smoke testing.
+- The workflow uses the free/no-key Jina Reader endpoint. No Jina credential is required while using this mode.
+- The workflow requires a Redis credential for shared rate limiting.
 - The workflow accepts a single URL and returns a single normalized response.
-- No Jina credential is required for this first slice. It uses the free unauthenticated Reader endpoint.
-- This first slice does not add Redis rate limiting, retries, batching, or authenticated Jina support yet.
-- Error responses should avoid returning raw request/response objects that may contain credentials or sensitive headers.
+- The top-level `content` key is the preferred output key for downstream workflows and AI nodes to read the markdown returned from the URL. `contentPreview` is only a test/debug field and should not be treated as canonical content.
+- Error responses should avoid returning raw unlimited request/response objects that may contain credentials or sensitive headers. Capped debug previews are acceptable.
 
-### Credential requirements
+### Reader URL construction and URL handling
 
-No credential is required for this first slice.
+Jina Reader reads a target URL by prepending the Reader host directly to the original target URL:
 
-### Input contract
-
-The workflow accepts one input item with this JSON shape:
-
-```json
-{
-  "url": "https://example.com/article",
-  "maxContentChars": 6000,
-  "requestTimeoutMs": 60000
-}
+```text
+https://r.jina.ai/https://example.com/page
 ```
 
-Accepted aliases:
+The workflow intentionally builds Reader URLs with lightweight string normalization followed by direct concatenation:
 
-- `url`: `targetUrl`, `sourceUrl`
-- `maxContentChars`: `max_content_chars`
-- `requestTimeoutMs`: `request_timeout_ms`
-
-Accepted URL forms:
-
-- `https://example.com/page`
-- `http://example.com/page`
-- `//example.com/page`, coerced to HTTPS
-- `example.com/page`, coerced to HTTPS
-- `https://r.jina.ai/https://example.com/page`, recovered to the target URL
-
-Defaults and limits:
-
-- `maxContentChars`: default `6000`, clamped from `1000` to `200000`.
-- `requestTimeoutMs`: default `60000`, clamped from `1000` to `300000`.
-
-### Output contract
-
-Successful responses use this top-level shape:
-
-```json
-{
-  "status": "ok",
-  "provider": "jina_reader",
-  "url": "https://example.com/article",
-  "readerUrl": "https://r.jina.ai/https://example.com/article",
-  "fetched": true,
-  "contentType": "markdown",
-  "contentChars": 6000,
-  "originalContentChars": 12000,
-  "truncated": true,
-  "content": "Title: ...
-URL Source: ...
-
-Markdown content...",
-  "reader": {},
-  "request": {},
-  "metadata": {},
-  "receivedAt": "2026-07-05T00:00:00.000Z"
-}
+```js
+readerUrl: `https://r.jina.ai/${url}`
 ```
 
-Error responses use this top-level shape:
+Do not replace this with generic `new URL(...)` parsing unless the change is specifically tested inside n8n with all accepted input forms. The reliable contract for this workflow is:
 
-```json
-{
-  "status": "error",
-  "provider": "jina_reader",
-  "url": "https://example.com/article",
-  "readerUrl": "https://r.jina.ai/https://example.com/article",
-  "fetched": false,
-  "content": null,
-  "error": {
-    "message": "Missing required input field: url",
-    "name": null,
-    "statusCode": null
-  },
-  "request": {},
-  "metadata": {
-    "strategy": "single_url_jina_reader_free_endpoint"
-  },
-  "receivedAt": "2026-07-05T00:00:00.000Z"
-}
-```
+1. Treat the incoming URL as a string.
+2. Strip an already-prepended `https://r.jina.ai/` prefix if present, so callers can safely pass either target URLs or Reader URLs.
+3. Coerce protocol-relative URLs such as `//example.com/page` to HTTPS.
+4. Repair malformed single-slash protocols such as `https:/example.com/page` to `https://example.com/page`.
+5. Coerce bare host/path values such as `example.com/page` to HTTPS.
+6. Build the Reader URL as `https://r.jina.ai/${url}`.
 
-
-
-### Implementation notes - 2026-07-06 patch
-
-- The standalone Reader workflow error formatter must preserve n8n string-style Code node errors. Earlier exports could return a generic `Jina Reader workflow failed` message while hiding the useful error in `metadata.inputPreview`.
-- URL normalization accepts `url`, `targetUrl`, `sourceUrl`, `href`, and `link` inputs.
-- Protocol-relative URLs such as `//docs.n8n.io/connect/create-nodes/overview` are normalized to HTTPS before constructing the Reader URL.
-- The companion test workflow should include both a normal full URL test and a protocol-relative URL regression test.
-
-### Rate-limit assumptions
-
-- Jina Reader free/no-key usage should still be treated conservatively, even though this first slice does not yet implement a shared rate limiter.
-- Parent workflows that call this repeatedly should keep volume low until a later slice adds shared rate limiting and retries.
-
-### Future work
-
-- Add shared rate limiting if multiple workflows will call Reader frequently.
-- Add retry policy for transient Reader failures.
-- Add optional authenticated Jina support if higher throughput is needed.
-- Consider a separate batch wrapper workflow if parent workflows often need to fetch many URLs and aggregate the results.
-
-
-### Patch note - Jina Reader callable v3
-
-The standalone callable **Jina Reader - Fetch URL** workflow was patched after testing exposed a protocol-relative URL normalization failure such as `//serper.dev/ [line 54]`.
-
-v3 design decisions:
-
-- URL normalization now parses with a safe base URL so protocol-relative inputs like `//example.com/page` resolve to `https://example.com/page`.
-- Bare hostnames such as `example.com/page` are still treated as HTTPS URLs before parsing.
-- Already-built Reader URLs such as `https://r.jina.ai/https://example.com/page` are normalized back to the target URL before rebuilding `readerUrl`.
-- Error responses preserve the original trigger input when normalization fails, so callers can see the attempted `url` instead of only the n8n error output.
-- The test workflow includes full URL, protocol-relative URL, and bare-hostname smoke cases.
-
-
-## Jina Reader standalone workflow
-
-### Current files
-
-- `workflows/jina-reader/README.md`
-- `workflows/jina-reader/jina-reader-fetch-url.workflow.json`
-- `workflows/jina-reader/test-jina-reader-fetch-url.workflow.json`
-
-### Purpose
-
-The standalone Jina Reader workflow is a reusable callable workflow that other n8n workflows can use when they already have a URL and only need Reader-enriched page content. It intentionally does not perform search.
-
-### Current implementation
-
-1. Receives one input item from another workflow.
-2. Normalizes a single URL input.
-3. Constructs the Reader URL with the same simple pattern used by the working Brave Search + Reader workflow: `https://r.jina.ai/${url}`.
-4. Calls the free/no-key Jina Reader endpoint.
-5. Returns normalized markdown content or a normalized error response.
-
-### Input contract
-
-```json
-{
-  "url": "https://serper.dev/",
-  "maxContentChars": 6000,
-  "requestTimeoutMs": 60000
-}
-```
-
-Accepted URL aliases: `url`, `targetUrl`, `sourceUrl`, `href`, and `link`.
+Accepted URL fields are `url`, `targetUrl`, `sourceUrl`, `href`, and `link`.
 
 Accepted URL forms:
 
@@ -429,125 +300,18 @@ Accepted URL forms:
 - `http://example.com/page`
 - `//example.com/page`
 - `example.com/page`
+- `https:/example.com/page`
 - `https://r.jina.ai/https://example.com/page`
-
-Defaults and limits:
-
-- `maxContentChars`: default `6000`, clamped from `1000` to `200000`.
-- `requestTimeoutMs`: default `60000`, clamped from `1000` to `300000`.
-
-### Output contract
-
-Successful responses use this top-level shape:
-
-```json
-{
-  "status": "ok",
-  "provider": "jina_reader",
-  "url": "https://serper.dev/",
-  "readerUrl": "https://r.jina.ai/https://serper.dev/",
-  "fetched": true,
-  "contentType": "markdown",
-  "contentChars": 6000,
-  "originalContentChars": 12000,
-  "truncated": true,
-  "content": "Title: ...
-URL Source: ...
-
-Markdown content...",
-  "request": {},
-  "metadata": {},
-  "receivedAt": "2026-07-06T00:00:00.000Z"
-}
-```
-
-Error responses use this top-level shape:
-
-```json
-{
-  "status": "error",
-  "provider": "jina_reader",
-  "url": "https://serper.dev/",
-  "readerUrl": null,
-  "fetched": false,
-  "content": null,
-  "contentChars": 0,
-  "originalContentChars": 0,
-  "truncated": false,
-  "error": {
-    "message": "Jina Reader workflow failed",
-    "name": null,
-    "statusCode": null
-  },
-  "request": {},
-  "metadata": {},
-  "receivedAt": "2026-07-06T00:00:00.000Z"
-}
-```
-
-### Business decisions
-
-- The standalone workflow is named **Jina Reader - Fetch URL**.
-- The companion workflow is named **Test - Jina Reader Fetch URL**.
-- This workflow is intentionally separate from Brave Search. Use it when a parent workflow already has the target URL.
-- The workflow is credential-free in this first slice and uses the free Jina Reader endpoint.
-- URL handling intentionally mirrors the existing working Brave Search + Reader workflow and avoids `new URL(...)`; the target URL is treated as a string and the Reader URL is built as `https://r.jina.ai/${url}`.
-- The workflow accepts protocol-relative and bare-hostname inputs, but normalizes them to HTTPS before calling Reader.
-- Error responses should avoid returning raw request/response objects that may contain sensitive data.
-
-### Patch history
-
-- v2 improved error reporting for n8n string-style Code-node errors and added URL aliases.
-- v3 attempted URL parsing with a base URL for protocol-relative inputs.
-- v4 removed URL parser usage and switched to string-only normalization to match the working Brave Search + Reader implementation.
-
-
-## Jina Reader callable workflow - Redis rate-limited single URL reader
-
-### Current files
-
-- `workflows/jina-reader/README.md`
-- `workflows/jina-reader/jina-reader-fetch-url.workflow.json`
-- `workflows/jina-reader/test-jina-reader-fetch-url.workflow.json`
-
-### Purpose
-
-This standalone workflow is a reusable callable Reader workflow for other n8n workflows. It accepts one URL, fetches it through Jina Reader, and returns normalized markdown content without requiring Brave Search.
-
-### Sources used
-
-- Jina Reader API documentation: https://jina.ai/reader/
-  - Used to confirm the free Reader endpoint is `https://r.jina.ai/`, URLs can be read by prepending `https://r.jina.ai/` to the target URL, and the no-key Reader API rate limit is currently 20 RPM.
-- n8n Redis node documentation/source:
-  - Used to confirm the built-in Redis node supports `Increment`, and that increment can set `expire: true` with a `ttl`, which performs the counter increment and then sets key expiration.
-- n8n Wait node documentation:
-  - Used to confirm Wait can pause by time interval and supports seconds, minutes, hours, and days. It also confirms waits shorter than 65 seconds do not offload execution data to the database, while longer waits can be offloaded and resumed.
-
-### Business decisions
-
-- The workflow name is **Jina Reader - Fetch URL**.
-- It is designed to be called by other workflows through **Execute Sub-workflow / Execute Workflow**.
-- The companion workflow **Test - Jina Reader Fetch URL** exists only for manual smoke testing.
-- The workflow uses the free/no-key Jina Reader endpoint. No Jina credential is required in this first Redis-rate-limited version.
-- The Reader URL is intentionally built with the same string-concatenation pattern that works in the Brave workflow:
-
-```js
-readerUrl: `https://r.jina.ai/${url}`
-```
-
-- Do **not** replace this with `new URL(...)` parsing unless the change is specifically tested inside n8n. Earlier standalone versions failed in the normalize step before the HTTP Request node. The reliable pattern is lightweight string normalization followed by direct `https://r.jina.ai/${url}` construction.
-- The top-level `content` key is the preferred output key for downstream workflows and AI nodes to read the markdown returned from the URL. `contentPreview` is only for test/debug views and should not be treated as canonical content.
-- Error responses should avoid returning raw request/response objects that may contain credentials or sensitive headers.
 
 ### Credential requirements
 
-Create or reselect an n8n **Redis** credential for the **Increment Rate Counter** node after import.
+Create or reselect an n8n **Redis** credential for the **Increment Rate Counter** node after importing the workflow.
 
 The workflow does not require a Jina credential while using the free/no-key Reader endpoint.
 
 ### Input contract
 
-The main workflow accepts one input item with this JSON shape:
+The workflow accepts one input item with this JSON shape:
 
 ```json
 {
@@ -557,22 +321,34 @@ The main workflow accepts one input item with this JSON shape:
   "redisRateLimitKey": "jina_reader:free:rpm",
   "rateLimitMaxRequests": 20,
   "rateLimitWindowSeconds": 60,
-  "rateLimitSleepBufferSeconds": 5
+  "rateLimitSleepBufferSeconds": 5,
+  "maxAttempts": 3
 }
 ```
 
-Accepted URL aliases:
+Accepted aliases:
 
 - `url`: `targetUrl`, `sourceUrl`, `href`, `link`
+- `maxContentChars`: `max_content_chars`
+- `requestTimeoutMs`: `request_timeout_ms`
+- `redisRateLimitKey`: `redis_rate_limit_key`, `rateLimitKey`, `rate_limit_key`
+- `rateLimitMaxRequests`: `rate_limit_max_requests`, `maxRequestsPerWindow`, `max_requests_per_window`
+- `rateLimitWindowSeconds`: `rate_limit_window_seconds`, `windowSeconds`, `window_seconds`
+- `rateLimitSleepBufferSeconds`: `rate_limit_sleep_buffer_seconds`, `sleepBufferSeconds`, `sleep_buffer_seconds`
+- `maxAttempts`: `max_attempts`, `retryMaxAttempts`, `retry_max_attempts`, `retryCount`, `retry_count`, `retries`
 
 Defaults and limits:
 
-- `maxContentChars`: default `6000`, clamped from `1000` to `200000`.
-- `requestTimeoutMs`: default `60000`, clamped from `1000` to `300000`.
-- `redisRateLimitKey`: default `jina_reader:free:rpm`.
-- `rateLimitMaxRequests`: default `20`, clamped from `1` to `1000`.
-- `rateLimitWindowSeconds`: default `60`, clamped from `1` to `3600`.
-- `rateLimitSleepBufferSeconds`: default `5`, clamped from `0` to `3600`.
+| Field | Default | Limits | Notes |
+| --- | ---: | ---: | --- |
+| `url` | none | non-empty string | Required. |
+| `maxContentChars` | `6000` | `1000` to `200000` | Truncates returned markdown. |
+| `requestTimeoutMs` | `60000` | `1000` to `300000` | Timeout for each Reader HTTP attempt. |
+| `redisRateLimitKey` | `jina_reader:free:rpm` | non-empty string | Shared Redis counter key. |
+| `rateLimitMaxRequests` | `20` | `1` to `1000` | Default matches the free/no-key Reader 20 RPM limit. |
+| `rateLimitWindowSeconds` | `60` | `1` to `3600` | Redis TTL reset window. |
+| `rateLimitSleepBufferSeconds` | `5` | `0` to `3600` | Added to the wait time after a limit hit. |
+| `maxAttempts` | `3` | `1` to `20` | Total Reader HTTP fetch attempts. The first fetch is attempt 1. |
 
 ### Output contract
 
@@ -587,17 +363,24 @@ Successful responses use this top-level shape:
   "fetched": true,
   "contentType": "markdown",
   "contentChars": 6000,
-  "originalContentChars": 8280,
+  "originalContentChars": 98351,
   "truncated": true,
-  "content": "Title: ...
-URL Source: ...
-
-Markdown Content: ...",
+  "content": "Title: ...\nURL Source: ...\n\nMarkdown Content: ...",
   "reader": {
     "status": "ok",
     "fetched": true,
     "provider": "jina_reader",
     "readerUrl": "https://r.jina.ai/https://serper.dev/"
+  },
+  "retry": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "currentAttempt": 1,
+    "attemptsMade": 1,
+    "succeeded": true,
+    "succeededAttempt": 1,
+    "failedAttempts": 0,
+    "errors": []
   },
   "rateLimit": {
     "enabled": true,
@@ -615,67 +398,104 @@ Markdown Content: ...",
   },
   "request": {},
   "metadata": {
-    "strategy": "single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit",
-    "contentKey": "content"
+    "strategy": "single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit_and_retry",
+    "contentKey": "content",
+    "contentKeyNote": "Use top-level content as the preferred key for the markdown read from the URL.",
+    "firstFetchCountsAsAttempt": true,
+    "retryStrategy": "reader_http_error_retry_total_attempts_first_fetch_is_attempt_1",
+    "rateLimitStrategy": "simple_counter_increment_before_request_reset_ttl_60s"
   },
   "receivedAt": "2026-07-06T00:26:54.039Z"
 }
 ```
 
-### Rate-limit behavior
+Downstream workflows should read the fetched markdown from top-level `content`. The `reader` object is status metadata, not the canonical content container.
 
-- This workflow intentionally uses a simple Redis counter, not a sliding window.
-- Redis key: default `jina_reader:free:rpm`.
-- Limit: default `20` attempts per `60` seconds for the free/no-key Jina Reader endpoint.
-- The workflow increments the Redis counter **before** the Reader request.
-- The Redis **Increment Rate Counter** node has `expire: true` and `ttl: 60`, so every attempt resets the counter key TTL to 60 seconds.
-- Attempts are counted whether the later Reader request succeeds or fails.
-- If the incremented counter is above the limit, the workflow does **not** call Jina Reader. It waits `remainingTtlSeconds + rateLimitSleepBufferSeconds` and then loops back to increment/check again.
-- Because the workflow resets TTL on every increment, the effective remaining TTL immediately after a limit-hit increment is treated as `rateLimitWindowSeconds`. With defaults, wait time is `60 + 5 = 65` seconds.
-- A 65-second default wait is intentional because n8n does not offload waits shorter than 65 seconds to the database. This keeps long backoff loops from holding the process hot.
-- If caller workflows may wait/retry for hours, ensure n8n workflow timeout settings and execution-data retention are configured accordingly.
+### Error contract
 
-### Future work
+Normalization errors, Redis errors, and exhausted Reader retries return normalized error responses instead of unhandled errors.
 
-- Consider adding an optional credentialed Jina path for higher throughput.
-- Consider a more precise Redis Lua or REST implementation if exact TTL reads are needed later. For this step, the requested behavior is deliberately simple and treats TTL as freshly reset after every increment.
-
-
-### Retry behavior
-
-- v6 adds Reader HTTP retry handling to **Jina Reader - Fetch URL**.
-- `maxAttempts` defaults to `3` and is configurable by caller workflows.
-- Accepted aliases are `maxAttempts`, `max_attempts`, `retryMaxAttempts`, `retry_max_attempts`, `retryCount`, `retry_count`, and `retries`.
-- `maxAttempts` means total Reader HTTP fetch attempts, not additional retries. The first Reader HTTP fetch is attempt `1`.
-- Reader HTTP errors are retried only after the workflow captures the actual error and appends it to `retry.errors[]`.
-- Each retry loops back through Redis rate limiting before making the next Reader HTTP request, so every fetch attempt still increments Redis before the request.
-- Rate-limit waits do not advance `retry.currentAttempt`, because no Reader HTTP fetch was made.
-- If all attempts fail, the workflow returns `status: "error"`, `fetched: false`, top-level `error`, `attemptsMade`, `maxAttempts`, and `retry.errors[]` so caller workflows can detect and debug failure.
-- The error object includes message, name, statusCode, code, description, responseBody when available, stack when available, and a capped `rawPreview`. Avoid returning unlimited raw request/response objects because they may contain sensitive data in other integrations.
-- Normalization errors and Redis credential/connection errors are not retried as Reader HTTP attempts; they return normalized error responses immediately.
-
-Updated input example:
+If all Reader HTTP attempts fail, the response uses this top-level shape:
 
 ```json
 {
-  "url": "https://serper.dev/",
-  "maxContentChars": 6000,
-  "requestTimeoutMs": 60000,
-  "redisRateLimitKey": "jina_reader:free:rpm",
-  "rateLimitMaxRequests": 20,
-  "rateLimitWindowSeconds": 60,
-  "rateLimitSleepBufferSeconds": 5,
-  "maxAttempts": 3
+  "status": "error",
+  "provider": "jina_reader",
+  "url": "https://example.invalid/",
+  "readerUrl": "https://r.jina.ai/https://example.invalid/",
+  "fetched": false,
+  "content": null,
+  "contentChars": 0,
+  "originalContentChars": 0,
+  "truncated": false,
+  "error": {
+    "message": "Jina Reader request failed",
+    "name": null,
+    "statusCode": 500,
+    "code": null,
+    "description": null,
+    "responseBody": "...",
+    "stack": "...",
+    "rawPreview": "..."
+  },
+  "retry": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "attemptsMade": 3,
+    "succeeded": false,
+    "failedAttempts": 3,
+    "shouldRetry": false,
+    "errors": []
+  },
+  "rateLimit": {},
+  "request": {},
+  "metadata": {
+    "strategy": "single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit_and_retry",
+    "contentKey": "content",
+    "retryStrategy": "reader_http_error_retry_total_attempts_first_fetch_is_attempt_1",
+    "firstFetchCountsAsAttempt": true
+  },
+  "receivedAt": "2026-07-06T00:00:00.000Z"
 }
 ```
 
-Updated success metadata strategy:
+`retry.errors[]` contains one entry per failed Reader HTTP attempt. Each entry should include the attempt number, timestamp, Reader URL, message, status code, response body if available, stack if available, and a capped `rawPreview` for debugging.
 
-```text
-single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit_and_retry
-```
+### Rate-limit behavior
 
-### Patch history update
+- The workflow intentionally uses a simple Redis counter, not a sliding window.
+- Redis key: default `jina_reader:free:rpm`.
+- Limit: default `20` attempts per `60` seconds for the free/no-key Jina Reader endpoint.
+- The workflow increments the Redis counter **before** each Reader HTTP fetch attempt.
+- The Redis **Increment Rate Counter** node has `expire: true` and `ttl: 60`, so every attempt resets the counter key TTL to 60 seconds.
+- Attempts are counted whether the later Reader request succeeds or fails.
+- If the incremented counter is above the limit, the workflow does **not** call Jina Reader. It waits `remainingTtlSeconds + rateLimitSleepBufferSeconds` and then loops back to increment/check again.
+- Rate-limit waits do not advance `retry.currentAttempt`, because no Reader HTTP fetch was made.
+- Because this workflow resets TTL on every increment, the effective remaining TTL immediately after a limit-hit increment is treated as `rateLimitWindowSeconds`. With defaults, wait time is `60 + 5 = 65` seconds.
+- A 65-second default wait is intentional because n8n does not offload waits shorter than 65 seconds to the database. This helps long backoff loops avoid keeping the process hot.
+- If caller workflows may wait/retry for hours, ensure n8n workflow timeout settings and execution-data retention are configured accordingly.
+- For Redis debugging, check the exact Redis instance and logical database configured in the n8n Redis credential. The rate-limit key has a short TTL and may disappear quickly after execution.
 
-- v5 added Redis simple-counter rate limiting, documented `content` as the preferred downstream markdown key, and preserved the working Brave-style Reader URL construction.
-- v6 adds configurable Reader HTTP retries with actual error propagation through top-level `error` and `retry.errors[]`.
+### Retry behavior
+
+- `maxAttempts` defaults to `3` and means total Reader HTTP fetch attempts, not additional retries.
+- The first Jina Reader HTTP fetch counts as attempt `1`.
+- On a Jina Reader HTTP error, the workflow captures the actual error details, appends them to `retry.errors[]`, and checks whether another attempt is available.
+- If `currentAttempt < maxAttempts`, the workflow loops back through Redis rate limiting before making the next Reader fetch.
+- Each retry attempt increments Redis before the Reader HTTP request.
+- Rate-limit waits do not advance the retry counter because no Reader HTTP request was made.
+- If all attempts fail, the workflow returns `status: "error"`, `fetched: false`, the final top-level `error`, and the full `retry.errors[]` history so caller workflows can detect and debug failure.
+- Normalization errors and Redis credential/connection errors are not retried as Reader HTTP attempts; they return normalized error responses immediately.
+
+### Operational notes
+
+- After import, reselect the Redis credential in **Increment Rate Counter**.
+- After importing the test workflow, open **Call Jina Reader Workflow** and select the imported **Jina Reader - Fetch URL** workflow from the local n8n dropdown.
+- The test workflow should verify `status: "ok"`, `fetched: true`, non-empty top-level `content`, `rateLimit.counter`, and `retry.succeededAttempt`.
+- Do not hard-code Redis passwords, Jina tokens, or other secrets in workflow JSON.
+
+### Future work
+
+- Add an optional credentialed Jina path for higher throughput.
+- Consider a more precise Redis Lua or REST implementation if exact TTL reads are needed later. The current behavior is deliberately simple and treats TTL as freshly reset after every increment.
+- Consider a batch wrapper workflow if parent workflows frequently need to fetch many URLs and aggregate the results.
