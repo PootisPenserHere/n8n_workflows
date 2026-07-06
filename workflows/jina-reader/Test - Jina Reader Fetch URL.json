@@ -3,26 +3,26 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "978626dc-b08a-4441-813d-f82071ba6d74",
+      "id": "8f8a6190-80a7-4310-9012-b3c4e5dba2e0",
       "name": "When clicking ‘Test workflow’",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        3104,
-        1152
+        3856,
+        1568
       ]
     },
     {
       "parameters": {
-        "jsCode": "return [\n  {\n    json: {\n      testCase: 'full_url_serper',\n      url: 'https://serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'protocol_relative_serper',\n      url: '//serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'protocol_relative_n8n_docs',\n      url: '//docs.n8n.io/connect/create-nodes/overview',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'bare_hostname_path_serper',\n      url: 'serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  }\n];"
+        "jsCode": "return {\n  json: {\n    url: 'https://serper.dev/',\n    maxContentChars: 6000,\n    requestTimeoutMs: 60000,\n    redisRateLimitKey: 'jina_reader:free:rpm',\n    rateLimitMaxRequests: 20,\n    rateLimitWindowSeconds: 60,\n    rateLimitSleepBufferSeconds: 5\n  }\n};"
       },
-      "id": "c82b1735-c5f0-4cec-87d4-aa595d628b5e",
+      "id": "1ec9f268-c561-49ee-946d-a14e7bf3b91e",
       "name": "Build Test Reader Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3344,
-        1152
+        4080,
+        1568
       ]
     },
     {
@@ -38,7 +38,11 @@
           "value": {
             "url": "={{ $json.url }}",
             "maxContentChars": "={{ $json.maxContentChars }}",
-            "requestTimeoutMs": "={{ $json.requestTimeoutMs }}"
+            "requestTimeoutMs": "={{ $json.requestTimeoutMs }}",
+            "redisRateLimitKey": "={{ $json.redisRateLimitKey }}",
+            "rateLimitMaxRequests": "={{ $json.rateLimitMaxRequests }}",
+            "rateLimitWindowSeconds": "={{ $json.rateLimitWindowSeconds }}",
+            "rateLimitSleepBufferSeconds": "={{ $json.rateLimitSleepBufferSeconds }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -71,6 +75,46 @@
               "canBeUsedToMatch": true,
               "type": "number",
               "removed": false
+            },
+            {
+              "id": "redisRateLimitKey",
+              "displayName": "redisRateLimitKey",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "rateLimitMaxRequests",
+              "displayName": "rateLimitMaxRequests",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "rateLimitWindowSeconds",
+              "displayName": "rateLimitWindowSeconds",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "rateLimitSleepBufferSeconds",
+              "displayName": "rateLimitSleepBufferSeconds",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
             }
           ],
           "attemptToConvertTypes": true,
@@ -81,43 +125,43 @@
           "waitForSubWorkflow": true
         }
       },
-      "id": "8bad3012-e161-4920-9320-365e50c473aa",
+      "id": "622fd213-1f2e-4238-9ab9-180a737b65d8",
       "name": "Call Jina Reader Workflow",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        3584,
-        1152
+        4320,
+        1568
       ],
-      "notes": "After importing the main workflow, open this node and select the imported Jina Reader - Fetch URL workflow."
+      "notes": "After importing the main Jina Reader workflow, replace this placeholder workflow ID with the imported main workflow."
     },
     {
       "parameters": {
-        "jsCode": "const response = $input.item.json || {};\nconst content = typeof response.content === 'string' ? response.content : '';\n\nreturn {\n  json: {\n    status: response.status,\n    provider: response.provider,\n    url: response.url,\n    readerUrl: response.readerUrl,\n    fetched: response.fetched,\n    contentChars: response.contentChars || 0,\n    originalContentChars: response.originalContentChars || 0,\n    truncated: Boolean(response.truncated),\n    contentPreview: content.slice(0, 800),\n    error: response.error || null,\n    fullResponse: response\n  }\n};"
+        "jsCode": "const response = $input.item.json || {};\n\nreturn {\n  json: {\n    status: response.status,\n    provider: response.provider,\n    url: response.url,\n    readerUrl: response.readerUrl,\n    fetched: response.fetched,\n    contentChars: response.contentChars || 0,\n    originalContentChars: response.originalContentChars || 0,\n    truncated: response.truncated || false,\n    // This is the preferred field downstream callers should use.\n    contentPreview: typeof response.content === 'string' ? response.content.slice(0, 1000) : '',\n    error: response.error || null,\n    rateLimit: response.rateLimit || null,\n    fullResponse: response\n  }\n};"
       },
-      "id": "fadf40e4-b4fe-4a1c-8240-a4abd9865349",
+      "id": "54112555-793c-40e9-86d8-7edc1a92befd",
       "name": "Prepare Test Preview",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3824,
-        1152
+        4560,
+        1568
       ]
     },
     {
       "parameters": {
-        "content": "## Test workflow setup\n\n1. Import `jina-reader-fetch-url.workflow.json`.\n2. Import this test workflow.\n3. Open **Call Jina Reader Workflow** and select the imported main workflow.\n4. Run manually.\n\nThis test sends two items:\n- `https://serper.dev/`\n- `//docs.n8n.io/connect/create-nodes/overview`\n\nExpected: each item returns `status: ok`, `provider: jina_reader`, `fetched: true`.",
-        "height": 300,
-        "width": 440,
+        "content": "## Test workflow setup\n1. Import `jina-reader-fetch-url.workflow.v5.json`.\n2. In the main workflow, open **Increment Rate Counter** and re-select your Redis credential.\n3. Save the main workflow.\n4. Import this test workflow.\n5. Open **Call Jina Reader Workflow** and select the imported main workflow.\n6. Run this test manually.\n\nExpected output: `status: ok`, `fetched: true`, a populated top-level `content` field, and `rateLimit.counter <= 20`.",
+        "height": 360,
+        "width": 520,
         "color": 4
       },
-      "id": "fa1a830f-a76b-4635-bf9c-bf3560523a99",
+      "id": "58c0407e-27da-4b55-aec6-19a767720468",
       "name": "Test Setup Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        3104,
-        816
+        3872,
+        1184
       ]
     }
   ],
@@ -163,7 +207,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "b437543e-34e1-4be4-9268-6d97fc7fdb6f",
+  "versionId": "806a9cdb-8aa5-476d-9623-69b336f71e23",
   "meta": {
     "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
   },

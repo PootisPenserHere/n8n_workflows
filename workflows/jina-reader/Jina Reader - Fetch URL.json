@@ -4,32 +4,102 @@
     {
       "parameters": {
         "inputSource": "jsonExample",
-        "jsonExample": "{\n  \"url\": \"https://serper.dev/\",\n  \"maxContentChars\": 6000,\n  \"requestTimeoutMs\": 60000\n}"
+        "jsonExample": "{\n  \"url\": \"https://serper.dev/\",\n  \"maxContentChars\": 6000,\n  \"requestTimeoutMs\": 60000,\n  \"redisRateLimitKey\": \"jina_reader:free:rpm\",\n  \"rateLimitMaxRequests\": 20,\n  \"rateLimitWindowSeconds\": 60,\n  \"rateLimitSleepBufferSeconds\": 5\n}"
       },
-      "id": "3728c2f2-e02b-4af3-92cc-0d745cb34d0f",
+      "id": "5c80cae8-e182-4ff0-895a-165ccf4b8e5a",
       "name": "When Executed by Another Workflow",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        8528,
-        704
+        9136,
+        960
       ],
-      "notes": "Callable workflow input. Required: url. Optional: maxContentChars, requestTimeoutMs."
+      "notes": "Callable workflow input. Required: url. Optional aliases: targetUrl, sourceUrl, href, link. Redis rate limit fields are optional and default to the free Jina Reader no-key limit."
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.item.json || {};\n\nconst parseInteger = (value, fallback) => {\n  const parsed = parseInt(value, 10);\n  return Number.isFinite(parsed) ? parsed : fallback;\n};\n\nconst clamp = (value, min, max) => Math.min(max, Math.max(min, value));\nconst firstString = (...values) => {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n};\n\nconst normalizeUrl = (value) => {\n  const original = String(value ?? '').trim();\n  if (!original) {\n    throw new Error('Missing required input field url');\n  }\n\n  let url = original\n    .replace(/[\\u0000-\\u001F\\u007F]/g, '')\n    .trim();\n\n  // Accept angle-bracketed URLs copied from chat/Slack/Markdown.\n  const angleMatch = url.match(/^<(.+)>$/);\n  if (angleMatch) {\n    url = angleMatch[1].trim();\n  }\n\n  // Accept an already-built Jina Reader URL, but normalize it back to the target URL.\n  url = url.replace(/^https?:\\/\\/r\\.jina\\.ai\\//i, '').trim();\n\n  // Match the working Brave workflow pattern: keep the target URL as a string and\n  // build the Reader URL as https://r.jina.ai/${url}. Avoid new URL(...), which is\n  // unnecessary here and can fail inside n8n Code-node sandboxes.\n  if (url.startsWith('//')) {\n    url = `https:${url}`;\n  }\n\n  // Fix accidental single-slash protocol forms like https:/example.com/page.\n  url = url.replace(/^(https?:)\\/(?!\\/)/i, '$1//');\n\n  // Treat bare hostnames as HTTPS URLs.\n  if (!/^https?:\\/\\//i.test(url)) {\n    if (!/^[a-z0-9.-]+\\.[a-z]{2,}([/:?#]|$)/i.test(url)) {\n      throw new Error('Invalid URL input - expected HTTP URL, HTTPS URL, protocol-relative URL, or bare hostname');\n    }\n    url = `https://${url}`;\n  }\n\n  if (!/^https?:\\/\\/[^\\s]+/i.test(url)) {\n    throw new Error('Invalid URL input - expected HTTP or HTTPS URL');\n  }\n\n  const hostname = url.replace(/^https?:\\/\\//i, '').split(/[/?#]/)[0];\n  if (!hostname || hostname.includes(' ') || !hostname.includes('.')) {\n    throw new Error('Invalid URL input - hostname is missing or malformed');\n  }\n\n  return url;\n};\n\nconst url = normalizeUrl(firstString(input.url, input.targetUrl, input.sourceUrl, input.href, input.link));\nconst maxContentChars = clamp(parseInteger(input.maxContentChars ?? input.max_content_chars, 6000), 1000, 200000);\nconst requestTimeoutMs = clamp(parseInteger(input.requestTimeoutMs ?? input.request_timeout_ms, 60000), 1000, 300000);\n\nreturn {\n  json: {\n    url,\n    readerUrl: `https://r.jina.ai/${url}`,\n    maxContentChars,\n    requestTimeoutMs,\n    provider: 'jina_reader',\n    requestedAt: new Date().toISOString(),\n    request: {\n      url,\n      maxContentChars,\n      requestTimeoutMs\n    }\n  }\n};"
+        "jsCode": "const input = $input.item.json || {};\n\nconst parseInteger = (value, fallback) => {\n  const parsed = parseInt(value, 10);\n  return Number.isFinite(parsed) ? parsed : fallback;\n};\n\nconst clamp = (value, min, max) => Math.min(max, Math.max(min, value));\nconst firstString = (...values) => {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n};\n\nconst normalizeUrl = (value) => {\n  const original = String(value ?? '').trim();\n  if (!original) {\n    throw new Error('Missing required input field url');\n  }\n\n  let url = original\n    .replace(/[\\u0000-\\u001F\\u007F]/g, '')\n    .trim();\n\n  // Accept angle-bracketed URLs copied from chat/Slack/Markdown.\n  const angleMatch = url.match(/^<(.+)>$/);\n  if (angleMatch) {\n    url = angleMatch[1].trim();\n  }\n\n  // Accept an already-built Jina Reader URL, but normalize it back to the target URL.\n  url = url.replace(/^https?:\\/\\/r\\.jina\\.ai\\//i, '').trim();\n\n  // Match the working Brave workflow pattern: keep the target URL as a string and\n  // build the Reader URL as https://r.jina.ai/${url}. Avoid new URL(...), which is\n  // unnecessary here and previously failed inside n8n Code-node handling.\n  if (url.startsWith('//')) {\n    url = `https:${url}`;\n  }\n\n  // Fix accidental single-slash protocol forms like https:/example.com/page.\n  url = url.replace(/^(https?:)\\/(?!\\/)/i, '$1//');\n\n  // Treat bare hostnames as HTTPS URLs.\n  if (!/^https?:\\/\\//i.test(url)) {\n    if (!/^[a-z0-9.-]+\\.[a-z]{2,}([/:?#]|$)/i.test(url)) {\n      throw new Error('Invalid URL input - expected HTTP URL, HTTPS URL, protocol-relative URL, or bare hostname');\n    }\n    url = `https://${url}`;\n  }\n\n  if (!/^https?:\\/\\/[^\\s]+/i.test(url)) {\n    throw new Error('Invalid URL input - expected HTTP or HTTPS URL');\n  }\n\n  const hostname = url.replace(/^https?:\\/\\//i, '').split(/[/?#]/)[0];\n  if (!hostname || hostname.includes(' ') || !hostname.includes('.')) {\n    throw new Error('Invalid URL input - hostname is missing or malformed');\n  }\n\n  return url;\n};\n\nconst url = normalizeUrl(firstString(input.url, input.targetUrl, input.sourceUrl, input.href, input.link));\nconst maxContentChars = clamp(parseInteger(input.maxContentChars ?? input.max_content_chars, 6000), 1000, 200000);\nconst requestTimeoutMs = clamp(parseInteger(input.requestTimeoutMs ?? input.request_timeout_ms, 60000), 1000, 300000);\n\nconst rateLimitMaxRequests = clamp(parseInteger(input.rateLimitMaxRequests ?? input.rate_limit_max_requests, 20), 1, 1000);\nconst rateLimitWindowSeconds = clamp(parseInteger(input.rateLimitWindowSeconds ?? input.rate_limit_window_seconds, 60), 1, 3600);\nconst rateLimitSleepBufferSeconds = clamp(parseInteger(input.rateLimitSleepBufferSeconds ?? input.rate_limit_sleep_buffer_seconds, 5), 0, 3600);\nconst redisRateLimitKey = firstString(\n  input.redisRateLimitKey,\n  input.redis_rate_limit_key,\n  input.rateLimitKey,\n  input.rate_limit_key,\n) || 'jina_reader:free:rpm';\n\nreturn {\n  json: {\n    url,\n    readerUrl: `https://r.jina.ai/${url}`,\n    maxContentChars,\n    requestTimeoutMs,\n    provider: 'jina_reader',\n    requestedAt: new Date().toISOString(),\n    request: {\n      url,\n      maxContentChars,\n      requestTimeoutMs,\n      redisRateLimitKey,\n      rateLimitMaxRequests,\n      rateLimitWindowSeconds,\n      rateLimitSleepBufferSeconds\n    },\n    rateLimit: {\n      enabled: true,\n      provider: 'redis',\n      redisKey: redisRateLimitKey,\n      limit: rateLimitMaxRequests,\n      windowSeconds: rateLimitWindowSeconds,\n      sleepBufferSeconds: rateLimitSleepBufferSeconds,\n      strategy: 'simple_counter_increment_before_request_reset_ttl_60s'\n    }\n  }\n};"
       },
-      "id": "e276c5a9-d6a3-43ff-859c-31d3a981053c",
+      "id": "1361ebd4-2be8-43c7-9529-e1700e743199",
       "name": "Normalize Input",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        8768,
-        704
+        9376,
+        960
       ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "incr",
+        "key": "={{ $json.rateLimit.redisKey }}",
+        "expire": true,
+        "ttl": "={{ $json.rateLimit.windowSeconds }}"
+      },
+      "id": "1a7df6a8-da1f-4c20-a6fe-f2a950b1bc18",
+      "name": "Increment Rate Counter",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        9632,
+        880
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      },
       "onError": "continueErrorOutput",
-      "notes": "String-only URL normalization. Mirrors the working Brave workflow pattern by constructing readerUrl as https://r.jina.ai/${url} and avoiding new URL(...)."
+      "notes": "Redis INCR happens before the Reader request. Expire+TTL is enabled so every attempt resets the counter window TTL. Reselect local Redis credentials after import."
+    },
+    {
+      "parameters": {
+        "jsCode": "const request = $('Normalize Input').first().json;\nconst redisOutput = $input.item.json || {};\nconst redisKey = request.rateLimit.redisKey;\n\nconst rawCounter = redisOutput[redisKey] ?? Object.values(redisOutput)[0] ?? 0;\nconst counter = Number.parseInt(rawCounter, 10);\nconst safeCounter = Number.isFinite(counter) ? counter : 0;\n\nconst limit = request.rateLimit.limit;\nconst remainingTtlSeconds = request.rateLimit.windowSeconds;\nconst waitSeconds = remainingTtlSeconds + request.rateLimit.sleepBufferSeconds;\nconst allowed = safeCounter <= limit;\n\nreturn {\n  json: {\n    ...request,\n    rateLimit: {\n      ...request.rateLimit,\n      counter: safeCounter,\n      allowed,\n      hit: !allowed,\n      remainingTtlSeconds,\n      waitSeconds,\n      checkedAt: new Date().toISOString(),\n      note: allowed\n        ? 'Counter is within the configured free Jina Reader limit.'\n        : 'Counter exceeded the configured limit. Wait remaining TTL plus buffer, then increment and check again.'\n    }\n  }\n};"
+      },
+      "id": "b5aedcf7-4710-4c96-86a8-b73639951061",
+      "name": "Attach Rate Limit State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9872,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "912744a9-6c84-4ec3-bc25-eec2543f24e8",
+              "leftValue": "={{ $json.rateLimit.allowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "66aa2712-f754-4b0e-b7c9-c55de2d4edfa",
+      "name": "Rate Limit Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        10112,
+        880
+      ]
     },
     {
       "parameters": {
@@ -56,58 +126,88 @@
           "timeout": "={{ $json.requestTimeoutMs }}"
         }
       },
-      "id": "bc0bdeb2-a898-4ea7-8f61-a46d617568c7",
+      "id": "cf0cb8af-edee-44be-9e4a-46e150271099",
       "name": "Jina Reader",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        9024,
-        624
+        10368,
+        752
       ],
       "onError": "continueErrorOutput",
-      "notes": "Uses the free/no-key Jina Reader endpoint by prepending https://r.jina.ai/ to the target URL."
+      "notes": "Free/no-key Reader path. Uses the same Reader URL construction pattern as the Brave search workflow: https://r.jina.ai/${url}."
     },
     {
       "parameters": {
-        "jsCode": "const source = $('Normalize Input').first().json;\nconst response = $input.item.json;\n\nlet content = '';\nif (typeof response === 'string') {\n  content = response;\n} else if (typeof response?.data === 'string') {\n  content = response.data;\n} else if (typeof response?.body === 'string') {\n  content = response.body;\n} else {\n  content = JSON.stringify(response ?? {});\n}\n\nconst maxContentChars = source.maxContentChars || 6000;\nconst originalContentChars = content.length;\nconst truncatedContent = content.slice(0, maxContentChars);\n\nreturn {\n  json: {\n    status: 'ok',\n    provider: 'jina_reader',\n    url: source.url,\n    readerUrl: source.readerUrl,\n    fetched: true,\n    contentType: 'markdown',\n    contentChars: truncatedContent.length,\n    originalContentChars,\n    truncated: originalContentChars > maxContentChars,\n    content: truncatedContent,\n    reader: {\n      status: 'ok',\n      fetched: true,\n      provider: 'jina_reader',\n      readerUrl: source.readerUrl\n    },\n    request: source.request,\n    metadata: {\n      strategy: 'single_url_jina_reader_free_endpoint',\n      maxContentChars,\n      requestTimeoutMs: source.requestTimeoutMs\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
+        "jsCode": "const source = $('Attach Rate Limit State').first().json;\nconst response = $input.item.json;\n\nlet content = '';\nif (typeof response === 'string') {\n  content = response;\n} else if (typeof response?.data === 'string') {\n  content = response.data;\n} else if (typeof response?.body === 'string') {\n  content = response.body;\n} else {\n  content = JSON.stringify(response ?? {});\n}\n\nconst maxContentChars = source.maxContentChars || 6000;\nconst originalContentChars = content.length;\nconst truncatedContent = content.slice(0, maxContentChars);\n\nreturn {\n  json: {\n    status: 'ok',\n    provider: 'jina_reader',\n    url: source.url,\n    readerUrl: source.readerUrl,\n    fetched: true,\n    contentType: 'markdown',\n    contentChars: truncatedContent.length,\n    originalContentChars,\n    truncated: originalContentChars > maxContentChars,\n    // Preferred key for downstream workflows and AI nodes.\n    content: truncatedContent,\n    reader: {\n      status: 'ok',\n      fetched: true,\n      provider: 'jina_reader',\n      readerUrl: source.readerUrl\n    },\n    rateLimit: source.rateLimit,\n    request: source.request,\n    metadata: {\n      strategy: 'single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit',\n      contentKey: 'content',\n      contentKeyNote: 'Use top-level content as the preferred key for the markdown read from the URL.',\n      maxContentChars,\n      requestTimeoutMs: source.requestTimeoutMs,\n      rateLimitStrategy: source.rateLimit.strategy\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
       },
-      "id": "9a2f6a05-7972-4d9f-a368-cc15d9c7fb0a",
+      "id": "3117ccbd-3b8c-4ca6-96d6-020565d54ca3",
       "name": "Format Reader Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        9296,
-        544
+        10624,
+        672
       ]
     },
     {
       "parameters": {
-        "jsCode": "let source = {};\nlet originalInput = {};\n\ntry {\n  source = $('Normalize Input').first().json || {};\n} catch (error) {\n  source = {};\n}\n\ntry {\n  originalInput = $('When Executed by Another Workflow').first().json || {};\n} catch (error) {\n  originalInput = {};\n}\n\nconst input = $input.item.json || {};\nconst rawError = input.error ?? input;\n\nconst errorMessage = (() => {\n  if (typeof rawError === 'string' && rawError.trim()) return rawError.trim();\n  if (rawError && typeof rawError.message === 'string' && rawError.message.trim()) return rawError.message.trim();\n  if (typeof input.message === 'string' && input.message.trim()) return input.message.trim();\n  return 'Jina Reader workflow failed';\n})();\n\nconst errorName = (() => {\n  if (rawError && typeof rawError === 'object' && rawError.name) return rawError.name;\n  if (input.name) return input.name;\n  return null;\n})();\n\nconst statusCode = (() => {\n  if (rawError && typeof rawError === 'object') {\n    return rawError.statusCode || rawError.status || rawError.httpCode || null;\n  }\n  return input.statusCode || input.status || null;\n})();\n\nconst attemptedUrl = source.url || originalInput.url || originalInput.targetUrl || originalInput.sourceUrl || originalInput.href || originalInput.link || null;\nconst attemptedReaderUrl = source.readerUrl || null;\nconst inputPreview = JSON.stringify({ originalInput, errorInput: input }).slice(0, 1000);\n\nreturn {\n  json: {\n    status: 'error',\n    provider: 'jina_reader',\n    url: attemptedUrl,\n    readerUrl: attemptedReaderUrl,\n    fetched: false,\n    content: null,\n    contentChars: 0,\n    originalContentChars: 0,\n    truncated: false,\n    error: {\n      message: errorMessage,\n      name: errorName,\n      statusCode\n    },\n    request: source.request || {\n      input: originalInput\n    },\n    metadata: {\n      strategy: 'single_url_jina_reader_free_endpoint',\n      urlHandling: 'string_only_brave_workflow_style',\n      inputPreview\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
+        "amount": "={{ $json.rateLimit.waitSeconds || 65 }}"
       },
-      "id": "df356d84-ce16-471b-80f2-15657b433d69",
+      "id": "3ecdeb52-c3e4-46e1-a580-180c47182172",
+      "name": "Wait For Rate Limit Window",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        10368,
+        992
+      ],
+      "webhookId": "4ed3e5f1-a833-4590-a2c7-c34654896d38",
+      "notes": "Waits remaining TTL + buffer. Default is 60 + 5 = 65 seconds, which allows n8n to offload the waiting execution data instead of keeping the process hot."
+    },
+    {
+      "parameters": {
+        "jsCode": "let source = {};\nlet rateLimitSource = {};\nlet originalInput = {};\n\ntry {\n  source = $('Normalize Input').first().json || {};\n} catch (error) {\n  source = {};\n}\n\ntry {\n  rateLimitSource = $('Attach Rate Limit State').first().json || {};\n} catch (error) {\n  rateLimitSource = {};\n}\n\ntry {\n  originalInput = $('When Executed by Another Workflow').first().json || {};\n} catch (error) {\n  originalInput = {};\n}\n\nconst input = $input.item.json || {};\nconst rawError = input.error ?? input;\n\nconst errorMessage = (() => {\n  if (typeof rawError === 'string' && rawError.trim()) return rawError.trim();\n  if (rawError && typeof rawError.message === 'string' && rawError.message.trim()) return rawError.message.trim();\n  if (typeof input.message === 'string' && input.message.trim()) return input.message.trim();\n  return 'Jina Reader workflow failed';\n})();\n\nconst errorName = (() => {\n  if (rawError && typeof rawError === 'object' && rawError.name) return rawError.name;\n  if (input.name) return input.name;\n  return null;\n})();\n\nconst statusCode = (() => {\n  if (rawError && typeof rawError === 'object') {\n    return rawError.statusCode || rawError.status || rawError.httpCode || null;\n  }\n  return input.statusCode || input.status || null;\n})();\n\nconst bestSource = Object.keys(rateLimitSource).length ? rateLimitSource : source;\nconst attemptedUrl = bestSource.url || originalInput.url || originalInput.targetUrl || originalInput.sourceUrl || originalInput.href || originalInput.link || null;\nconst attemptedReaderUrl = bestSource.readerUrl || null;\nconst inputPreview = JSON.stringify({ originalInput, errorInput: input }).slice(0, 1000);\n\nreturn {\n  json: {\n    status: 'error',\n    provider: 'jina_reader',\n    url: attemptedUrl,\n    readerUrl: attemptedReaderUrl,\n    fetched: false,\n    content: null,\n    contentChars: 0,\n    originalContentChars: 0,\n    truncated: false,\n    error: {\n      message: errorMessage,\n      name: errorName,\n      statusCode\n    },\n    rateLimit: bestSource.rateLimit || source.rateLimit || null,\n    request: bestSource.request || source.request || {\n      input: originalInput\n    },\n    metadata: {\n      strategy: 'single_url_jina_reader_free_endpoint_with_redis_simple_counter_rate_limit',\n      contentKey: 'content',\n      urlHandling: 'string_only_brave_workflow_style',\n      inputPreview\n    },\n    receivedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "f5c62719-d30c-4281-8ce3-fc65ec842c5a",
       "name": "Format Error Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        9296,
-        832
-      ],
-      "notes": "Normalizes Code node and HTTP Request errors, including n8n string-style error output."
+        9872,
+        1120
+      ]
     },
     {
       "parameters": {
-        "content": "## Jina Reader callable workflow\nReceives one URL from another workflow, normalizes it with string-only logic, calls the free Jina Reader endpoint, and returns normalized markdown content.\n\nReader URL pattern mirrors the working Brave search workflow:\n`https://r.jina.ai/${url}`\n\nNo credentials are required for this first slice. Keep volume conservative on the free endpoint.",
-        "height": 260,
-        "width": 360,
+        "content": "## Redis rate limit\nThis workflow requires an n8n **Redis** credential.\n\nDefault key: `jina_reader:free:rpm`\nDefault limit: `20` attempts per `60` seconds\nDefault wait on limit hit: `remaining TTL + 5s` = `65s`\n\nThe Redis increment runs **before** the Jina Reader request. The TTL is reset to 60 seconds on every attempt, whether the later Reader request succeeds or fails.",
+        "height": 320,
+        "width": 420,
+        "color": 5
+      },
+      "id": "59263fe8-505b-4276-ac34-8da493428975",
+      "name": "Redis Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        9328,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Jina Reader callable workflow\nReceives one URL from another workflow, normalizes it with string-only logic, rate-limits with Redis, calls the free Jina Reader endpoint, and returns normalized markdown content.\n\nPreferred downstream key: `content`\n\nReader URL pattern mirrors the working Brave search workflow:\n`https://r.jina.ai/${url}`",
+        "height": 280,
+        "width": 420,
         "color": 4
       },
-      "id": "8aa7e238-4ef5-41eb-a81d-4bf80dce771e",
+      "id": "5cd0a584-4978-4382-a5ca-30050f9dadf0",
       "name": "Workflow Note",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        8528,
-        368
+        9808,
+        496
       ]
     }
   ],
@@ -117,7 +217,11 @@
         "json": {
           "url": "https://serper.dev/",
           "maxContentChars": 6000,
-          "requestTimeoutMs": 60000
+          "requestTimeoutMs": 60000,
+          "redisRateLimitKey": "jina_reader:free:rpm",
+          "rateLimitMaxRequests": 20,
+          "rateLimitWindowSeconds": 60,
+          "rateLimitSleepBufferSeconds": 5
         }
       }
     ]
@@ -138,7 +242,7 @@
       "main": [
         [
           {
-            "node": "Jina Reader",
+            "node": "Increment Rate Counter",
             "type": "main",
             "index": 0
           }
@@ -146,6 +250,53 @@
         [
           {
             "node": "Format Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Rate Counter": {
+      "main": [
+        [
+          {
+            "node": "Attach Rate Limit State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Rate Limit State": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Available?": {
+      "main": [
+        [
+          {
+            "node": "Jina Reader",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait For Rate Limit Window",
             "type": "main",
             "index": 0
           }
@@ -169,6 +320,17 @@
           }
         ]
       ]
+    },
+    "Wait For Rate Limit Window": {
+      "main": [
+        [
+          {
+            "node": "Increment Rate Counter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -177,7 +339,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "8798e27e-88c5-43a7-85a4-a1666c185dbb",
+  "versionId": "0efe14f6-b5ef-4546-b0fa-e94f9343bd8d",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
