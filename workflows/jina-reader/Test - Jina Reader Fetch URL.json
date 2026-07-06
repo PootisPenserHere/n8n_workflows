@@ -1,0 +1,172 @@
+{
+  "name": "Test - Jina Reader Fetch URL",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "978626dc-b08a-4441-813d-f82071ba6d74",
+      "name": "When clicking ‘Test workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        3104,
+        1152
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      testCase: 'full_url_serper',\n      url: 'https://serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'protocol_relative_serper',\n      url: '//serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'protocol_relative_n8n_docs',\n      url: '//docs.n8n.io/connect/create-nodes/overview',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  },\n  {\n    json: {\n      testCase: 'bare_hostname_path_serper',\n      url: 'serper.dev/',\n      maxContentChars: 6000,\n      requestTimeoutMs: 60000\n    }\n  }\n];"
+      },
+      "id": "c82b1735-c5f0-4cec-87d4-aa595d628b5e",
+      "name": "Build Test Reader Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3344,
+        1152
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "zIfocJFY5AaKzmW5",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/zIfocJFY5AaKzmW5"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "url": "={{ $json.url }}",
+            "maxContentChars": "={{ $json.maxContentChars }}",
+            "requestTimeoutMs": "={{ $json.requestTimeoutMs }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "maxContentChars",
+              "displayName": "maxContentChars",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "requestTimeoutMs",
+              "displayName": "requestTimeoutMs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "8bad3012-e161-4920-9320-365e50c473aa",
+      "name": "Call Jina Reader Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        3584,
+        1152
+      ],
+      "notes": "After importing the main workflow, open this node and select the imported Jina Reader - Fetch URL workflow."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json || {};\nconst content = typeof response.content === 'string' ? response.content : '';\n\nreturn {\n  json: {\n    status: response.status,\n    provider: response.provider,\n    url: response.url,\n    readerUrl: response.readerUrl,\n    fetched: response.fetched,\n    contentChars: response.contentChars || 0,\n    originalContentChars: response.originalContentChars || 0,\n    truncated: Boolean(response.truncated),\n    contentPreview: content.slice(0, 800),\n    error: response.error || null,\n    fullResponse: response\n  }\n};"
+      },
+      "id": "fadf40e4-b4fe-4a1c-8240-a4abd9865349",
+      "name": "Prepare Test Preview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3824,
+        1152
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Test workflow setup\n\n1. Import `jina-reader-fetch-url.workflow.json`.\n2. Import this test workflow.\n3. Open **Call Jina Reader Workflow** and select the imported main workflow.\n4. Run manually.\n\nThis test sends two items:\n- `https://serper.dev/`\n- `//docs.n8n.io/connect/create-nodes/overview`\n\nExpected: each item returns `status: ok`, `provider: jina_reader`, `fetched: true`.",
+        "height": 300,
+        "width": 440,
+        "color": 4
+      },
+      "id": "fa1a830f-a76b-4635-bf9c-bf3560523a99",
+      "name": "Test Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3104,
+        816
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Test workflow’": {
+      "main": [
+        [
+          {
+            "node": "Build Test Reader Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Test Reader Payload": {
+      "main": [
+        [
+          {
+            "node": "Call Jina Reader Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Jina Reader Workflow": {
+      "main": [
+        [
+          {
+            "node": "Prepare Test Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b437543e-34e1-4be4-9268-6d97fc7fdb6f",
+  "meta": {
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "YLul523l5eGMPb7V",
+  "tags": []
+}
