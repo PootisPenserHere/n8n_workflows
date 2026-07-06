@@ -12,7 +12,7 @@ Keep this file in the repository root and update it whenever workflow behavior, 
 - Do not hard-code secrets in workflow JSON. Use n8n credentials.
 - Imported workflow JSON can contain stale credential IDs or workflow IDs from another n8n instance. After import, reselect credentials and called workflows from the local n8n UI.
 
-## Web search workflows - Brave API + Jina Reader
+## Web search workflows - Brave API + Jina Reader Workflow
 
 ### Current files
 
@@ -22,47 +22,46 @@ Keep this file in the repository root and update it whenever workflow behavior, 
 
 ### Purpose
 
-The web search workflow is a reusable callable workflow that other n8n workflows can use to send a search query and receive normalized web records for downstream AI inference.
+The web search workflow is a reusable callable workflow that other n8n workflows can use to send a Brave search query and receive normalized web records with Reader-enriched page content.
 
 The current implementation:
 
 1. Receives a query from another workflow.
 2. Calls Brave Web Search for candidate links.
 3. Normalizes and deduplicates candidate URLs.
-4. Fetches page content for a limited number of top URLs using the free Jina Reader endpoint.
-5. Returns a normalized response containing Brave metadata and Reader-enriched page content.
+4. Calls the standalone **Jina Reader - Fetch URL** workflow once for every unique Brave result URL.
+5. Returns Brave metadata plus Reader content and Reader diagnostics per record.
+
+The Brave workflow no longer calls the Jina Reader HTTP endpoint directly. Reader rate limiting, Redis sleeps, retry attempts, Reader URL normalization, and Reader error normalization all live in the standalone Jina Reader workflow.
 
 ### Sources used
 
 - n8n Execute Sub-workflow Trigger documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/
-  - Used to confirm callable workflows start with **Execute Sub-workflow Trigger / When Executed by Another Workflow**.
+  - Used to confirm the callable workflow starts with **Execute Sub-workflow Trigger / When Executed by Another Workflow**.
 - n8n Execute Sub-workflow documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/
-  - Used to confirm parent workflows can call reusable workflows and wait for the sub-workflow response.
+  - Used to confirm parent workflows can call reusable workflows and wait for sub-workflow responses.
 - n8n HTTP Request node documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
-  - Used for Brave and Jina Reader HTTP calls.
+  - Used for the Brave Web Search HTTP call.
 - n8n HTTP Request credentials documentation: https://docs.n8n.io/integrations/builtin/credentials/httprequest/
   - Used for the Brave `X-Subscription-Token` HTTP Header Auth credential.
-- n8n rate-limit documentation: https://docs.n8n.io/integrations/builtin/rate-limits/
-  - Used for the Loop Over Items + Wait approach to avoid bursting Reader requests in the Brave workflow.
-- n8n Loop Over Items documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/
-  - Used for one-URL-at-a-time Reader processing.
 - Jina Reader API documentation: https://jina.ai/reader/
-  - Used to confirm the free Reader endpoint is `https://r.jina.ai/`, the no-key Reader limit is 20 RPM, and URLs can be read by prepending `https://r.jina.ai/` to the target URL.
+  - Used by the standalone Reader workflow to confirm the free Reader endpoint is `https://r.jina.ai/`, URLs can be read by prepending `https://r.jina.ai/`, and the no-key Reader API rate limit is currently 20 RPM.
 - Brave Web Search API reference: https://api-dashboard.search.brave.com/api-reference/web/search/get
   - Used to confirm `GET https://api.search.brave.com/res/v1/web/search`, the required `q` parameter, `count` limits, `freshness`, `result_filter`, and the `X-Subscription-Token` header.
 
 ### Business decisions
 
-- The reusable workflow is named **Web Search - Brave API + Reader**.
+- The current reusable workflow is named **Web Search - Brave API + Jina Reader Workflow**.
 - It is designed to be called by other workflows through **Execute Sub-workflow / Execute Workflow**.
-- The companion workflow **Test - Web Search Brave API + Reader** exists only for manual testing and smoke checks.
-- The current strategy is: over-retrieve from Brave, dedupe URLs, then read only the top `readTopN` URLs using Jina Reader.
-- The workflow uses Brave ranking as the first-pass ordering and does not use a dedicated reranker yet.
-- Reader calls are rate-controlled with **Loop Over Items** batch size 1 plus **Wait Between Reader Calls**.
+- The companion workflow **Test - Web Search Brave API + Jina Reader Workflow** exists only for manual testing and smoke checks.
+- The workflow searches with Brave and delegates all content fetching to **Jina Reader - Fetch URL**.
+- The old Brave-internal Reader HTTP call, `readTopN`, and `readerDelaySeconds` behavior are removed from the active contract.
+- The workflow now fetches content for **all unique Brave candidates** returned by `count`, because the standalone Reader workflow handles Redis rate limiting and sleep/backoff internally.
 - Brave API key must remain in n8n credentials, never in workflow JSON.
+- The Brave workflow must be configured after import by reselecting both the Brave credential and the imported **Jina Reader - Fetch URL** sub-workflow.
 - Error responses should avoid returning raw request/response objects that may contain credentials or sensitive headers.
 
-### Credential requirements
+### Credential and workflow requirements
 
 Create an n8n **HTTP Header Auth** credential for Brave.
 
@@ -79,19 +78,28 @@ Name:  X-Subscription-Token
 Value: <your Brave Search API key>
 ```
 
-After importing the workflow, open the **Brave Web Search** HTTP Request node and reselect the local Brave credential. Exported workflow JSON may contain stale credential IDs from another n8n instance.
+Also import and configure **Jina Reader - Fetch URL** before using the Brave workflow. The standalone Reader workflow owns the Redis credential and free Reader rate-limit behavior.
+
+After importing the Brave workflow:
+
+1. Open **Brave Web Search** and reselect the local Brave credential.
+2. Open **Call Jina Reader Workflow** and select the imported **Jina Reader - Fetch URL** workflow.
 
 ### Input contract
 
-The workflow accepts one input item with this JSON shape:
+The main workflow accepts one input item with this JSON shape:
 
 ```json
 {
   "query": "n8n execute sub-workflow trigger input data",
   "count": 10,
-  "readTopN": 3,
-  "readerDelaySeconds": 4,
   "maxContentChars": 6000,
+  "requestTimeoutMs": 60000,
+  "redisRateLimitKey": "jina_reader:free:rpm",
+  "rateLimitMaxRequests": 20,
+  "rateLimitWindowSeconds": 60,
+  "rateLimitSleepBufferSeconds": 5,
+  "maxAttempts": 3,
   "country": "US",
   "search_lang": "en",
   "ui_lang": "en-US",
@@ -104,18 +112,27 @@ Accepted aliases:
 
 - `query`: `q`, `searchQuery`
 - `count`: `limit`
-- `readTopN`: `read_top_n`, `readerLimit`
-- `readerDelaySeconds`: `reader_delay_seconds`
 - `maxContentChars`: `max_content_chars`
+- `requestTimeoutMs`: `request_timeout_ms`
+- `redisRateLimitKey`: `redis_rate_limit_key`
+- `rateLimitMaxRequests`: `rate_limit_max_requests`
+- `rateLimitWindowSeconds`: `rate_limit_window_seconds`
+- `rateLimitSleepBufferSeconds`: `rate_limit_sleep_buffer_seconds`
+- `maxAttempts`: `max_attempts`, `retryMaxAttempts`, `retry_max_attempts`, `retryCount`, `retry_count`, `retries`
 - `search_lang`: `searchLang`
 - `ui_lang`: `uiLang`
 
 Defaults and limits:
 
+- `query`: required non-empty string.
 - `count`: default `10`, clamped from `1` to `20`.
-- `readTopN`: default `3`, clamped from `0` to `5`.
-- `readerDelaySeconds`: default `4`, clamped from `1` to `60`.
-- `maxContentChars`: default `6000`, clamped from `1000` to `50000`.
+- `maxContentChars`: default `6000`, clamped from `1000` to `200000`; passed to the Reader sub-workflow.
+- `requestTimeoutMs`: default `60000`, clamped from `1000` to `300000`; passed to the Reader sub-workflow.
+- `redisRateLimitKey`: default `jina_reader:free:rpm`; passed to the Reader sub-workflow.
+- `rateLimitMaxRequests`: default `20`, clamped from `1` to `1000`; passed to the Reader sub-workflow.
+- `rateLimitWindowSeconds`: default `60`, clamped from `1` to `3600`; passed to the Reader sub-workflow.
+- `rateLimitSleepBufferSeconds`: default `5`, clamped from `0` to `3600`; passed to the Reader sub-workflow.
+- `maxAttempts`: default `3`, clamped from `1` to `20`; total Reader HTTP attempts per URL.
 - `country`: default `US`.
 - `search_lang`: default `en`.
 - `ui_lang`: default `en-US`.
@@ -124,110 +141,84 @@ Defaults and limits:
 
 ### Output contract
 
-Successful responses use this top-level shape:
+Successful or partially successful responses use this top-level shape:
 
 ```json
 {
   "status": "ok",
-  "provider": "brave+jina_reader",
+  "provider": "brave+jina_reader_workflow",
   "query": "n8n execute sub-workflow trigger input data",
   "candidateCount": 10,
-  "recordCount": 3,
+  "recordCount": 10,
   "records": [],
   "request": {},
   "metadata": {},
-  "receivedAt": "2026-06-26T23:41:37.114Z"
+  "receivedAt": "2026-07-06T00:00:00.000Z"
 }
 ```
 
-Each record includes Brave metadata and a `reader` object:
+Possible top-level statuses:
+
+- `ok`: Brave succeeded and every Reader sub-workflow response succeeded.
+- `partial_error`: Brave succeeded, but at least one Reader sub-workflow response returned `status: "error"`.
+- `error`: Brave failed before records were produced, or every Reader sub-workflow response failed. When Brave succeeded but all Reader calls failed, records are still returned with per-record Reader errors.
+
+Each record includes Brave metadata plus Reader content and diagnostics:
 
 ```json
 {
   "rank": 1,
-  "title": "Execute Sub-workflow | n8n Docs",
-  "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/",
+  "title": "Example result",
+  "url": "https://example.com/article",
   "description": "Search result description from Brave.",
-  "age": null,
-  "pageAge": null,
-  "language": "en",
-  "familyFriendly": true,
-  "extraSnippets": [],
-  "profile": null,
   "source": "brave:web",
-  "readerRank": 1,
+  "content": "Title: ...
+URL Source: ...
+
+Markdown Content: ...",
   "reader": {
     "status": "ok",
     "fetched": true,
     "provider": "jina_reader",
-    "readerUrl": "https://r.jina.ai/https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/",
+    "readerUrl": "https://r.jina.ai/https://example.com/article",
     "contentType": "markdown",
     "contentChars": 6000,
     "originalContentChars": 12000,
     "truncated": true,
-    "content": "Title: ...\nURL Source: ...\n\nMarkdown content..."
+    "content": "Title: ...
+URL Source: ...
+
+Markdown Content: ...",
+    "error": null,
+    "retry": {},
+    "rateLimit": {}
   }
 }
 ```
 
-Possible `reader.status` values:
+For downstream workflows, prefer `records[].content`. `records[].reader.content` is retained for compatibility with the previous Brave output shape.
 
-- `ok`: Jina Reader returned content and the workflow attached it to the record.
-- `error`: Jina Reader failed for that URL, but the workflow preserved the record and attached error details.
-- `skipped`: The workflow did not fetch Reader content for the record, usually because no Reader URL was available or `readTopN` was `0`.
+### Error behavior
 
-### Error contract
-
-If the workflow fails before producing records, it returns a normalized error response:
-
-```json
-{
-  "status": "error",
-  "provider": "brave+jina_reader",
-  "query": "example query",
-  "candidateCount": 0,
-  "recordCount": 0,
-  "records": [],
-  "error": {
-    "message": "Search workflow failed before producing results",
-    "name": null
-  },
-  "request": {},
-  "receivedAt": "2026-06-26T23:41:37.114Z"
-}
-```
-
-### Rate-limit assumptions
-
-- Jina Reader free no-key endpoint should be treated conservatively.
-- Current Brave workflow default: `readTopN: 3` and `readerDelaySeconds: 4`.
-- Keep `readTopN` small when using the free endpoint.
-- Prefer increasing Brave `count` first and keeping Reader enrichment between `3` and `5` URLs.
-
-Recommended starting points:
-
-| Use case | `count` | `readTopN` | `readerDelaySeconds` | `maxContentChars` |
-| --- | ---: | ---: | ---: | ---: |
-| Fast smoke test | `5` | `1` | `4` | `3000` |
-| Normal AI grounding | `10` | `3` | `4` | `6000` |
-| Deeper research | `20` | `5` | `4` to `8` | `10000` |
+- Search-level failures return a normalized top-level `status: "error"`, no records, and an `error` object.
+- Reader-level failures are preserved per record in `record.reader.error` and summarized in `metadata.readerStats`, `metadata.readerFailureCount`, and `metadata.failedReaderRecords`.
+- The standalone Reader workflow's actual Reader error and retry details are preserved under `record.reader.retry`.
 
 ### Future work
 
-- Add a true reranker after the Reader-enriched version is stable.
+- Add a true reranker after the Reader-enriched all-candidates version is stable.
 - Preferred future flow:
 
 ```text
 Brave returns up to 20 candidates
   -> Normalize and dedupe URLs
-  -> Rerank titles/descriptions against the query
-  -> Read top 3-5 URLs with Jina Reader
-  -> Optionally rerank content previews
+  -> Read all candidate URLs with Jina Reader callable workflow
+  -> Rerank titles/descriptions/content against the query
   -> Return enriched records
 ```
 
-- Consider adding a credentialed Jina path if higher Reader throughput or Jina Reranker is needed.
-- Preserve the current callable workflow contract as much as possible so existing parent workflows do not break.
+- Consider adding a credentialed Jina path in the standalone Reader workflow if higher Reader throughput is needed.
+- Preserve the callable workflow contract as much as possible so existing parent workflows do not break.
 
 ## Jina Reader workflow - Fetch URL
 

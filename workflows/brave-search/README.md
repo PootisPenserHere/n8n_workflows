@@ -1,20 +1,20 @@
 # Web Search Workflows
 
-This directory contains reusable n8n workflows for running a web search, enriching the top search results with page content, and returning a normalized response to other workflows.
+This directory contains reusable n8n workflows for running Brave Web Search, fetching every returned result URL through the standalone Jina Reader workflow, and returning normalized records to other workflows.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `web-search-brave-api-reader.workflow.json` | Main callable workflow. Receives a search query, calls Brave Search, fetches selected result pages through Jina Reader, and returns normalized records. |
-| `test-web-search-brave-api-reader.workflow.json` | Manual test workflow. Sends a sample payload to the main workflow and shows a compact preview of the response. |
+| `web-search-brave-api-reader.workflow.json` | Main callable workflow. Receives a search query, calls Brave Search, calls `Jina Reader - Fetch URL` once per unique Brave result, and returns normalized records with content. |
+| `test-web-search-brave-api-reader.workflow.json` | Manual test workflow. Sends a sample payload to the main workflow and shows a compact preview. |
 | `README.md` | Local setup and usage notes for these web search workflows. |
 
 AI implementation context is kept in the repository root at `AI_CONTEXT.md`, not in this workflow directory. From this directory, the relative path is `../../AI_CONTEXT.md`.
 
 ## Main workflow
 
-**Workflow name:** `Web Search - Brave API + Reader`
+**Workflow name:** `Web Search - Brave API + Jina Reader Workflow`
 
 This workflow is intended to be called from other workflows using n8n's Execute Workflow / sub-workflow mechanism.
 
@@ -25,34 +25,30 @@ When Executed by Another Workflow
   -> Normalize Input
   -> Brave Web Search
   -> Build Reader Queue
-  -> Loop Over Reader URLs
-  -> Jina Reader
-  -> Wait Between Reader Calls
-  -> Format Final Response
+  -> Has Candidate URL?
+      true  -> Call Jina Reader Workflow
+                  -> Attach Reader Workflow Response
+                  -> Format Final Response
+      false -> Format Final Response
 ```
 
-The workflow currently uses Brave's ranking as the first-pass ordering. It does not use a dedicated reranker yet.
+The workflow no longer calls Jina Reader directly. It delegates each URL fetch to the standalone **Jina Reader - Fetch URL** workflow, which handles Redis rate limiting, wait/backoff behavior, Reader HTTP retries, and normalized Reader errors.
 
-## Test workflow
+## Required setup
 
-**Workflow name:** `Test - Web Search Brave API + Reader`
+1. Import and configure `workflows/jina-reader/jina-reader-fetch-url.workflow.json` first.
+2. In the Jina Reader workflow, open **Increment Rate Counter** and select the local Redis credential.
+3. Import `web-search-brave-api-reader.workflow.json`.
+4. Open **Brave Web Search** and select the local Brave HTTP Header Auth credential.
+5. Open **Call Jina Reader Workflow** and select the imported **Jina Reader - Fetch URL** workflow.
+6. Save the main workflow.
+7. Import `test-web-search-brave-api-reader.workflow.json`.
+8. Open **Call Web Search Reader Workflow** and select the imported main Brave workflow.
+9. Save and run the test workflow.
 
-Use this workflow after importing the main workflow. It builds a sample input payload, calls the main workflow, and returns a preview with:
+## Required credentials
 
-- overall status
-- provider
-- query
-- candidate count
-- returned record count
-- Reader status counts
-- first three enriched results
-- full response payload
-
-After importing, open the **Call Web Search Reader Workflow** node and select the imported `Web Search - Brave API + Reader` workflow from the dropdown. The exported workflow contains a placeholder workflow ID that must be replaced in your n8n instance.
-
-## Required credential
-
-Create an n8n credential using **HTTP Header Auth**.
+Create an n8n **HTTP Header Auth** credential for Brave.
 
 Suggested credential display name:
 
@@ -67,19 +63,23 @@ Name:  X-Subscription-Token
 Value: <your Brave Search API key>
 ```
 
-After importing the main workflow, open the **Brave Web Search** HTTP Request node and select this credential. Imported workflow exports can contain stale credential IDs, so always reselect the credential in your own n8n instance.
+The Brave workflow itself does not need Redis credentials. Redis is configured in the standalone `Jina Reader - Fetch URL` workflow.
 
 ## Input contract
 
-The main workflow accepts one input item with this JSON shape.
+The main workflow accepts one input item with this JSON shape:
 
 ```json
 {
   "query": "n8n execute sub-workflow trigger input data",
   "count": 10,
-  "readTopN": 3,
-  "readerDelaySeconds": 4,
   "maxContentChars": 6000,
+  "requestTimeoutMs": 60000,
+  "redisRateLimitKey": "jina_reader:free:rpm",
+  "rateLimitMaxRequests": 20,
+  "rateLimitWindowSeconds": 60,
+  "rateLimitSleepBufferSeconds": 5,
+  "maxAttempts": 3,
   "country": "US",
   "search_lang": "en",
   "ui_lang": "en-US",
@@ -88,165 +88,122 @@ The main workflow accepts one input item with this JSON shape.
 }
 ```
 
-### Input fields
+Accepted aliases:
 
-| Field | Required | Default | Limits / allowed values | Description |
-| --- | --- | --- | --- | --- |
-| `query` | Yes | none | non-empty string | Search query. Aliases accepted by the workflow: `q`, `searchQuery`. |
-| `count` | No | `10` | `1` to `20` | Number of Brave search candidates to request and normalize. Alias accepted: `limit`. |
-| `readTopN` | No | `3` | `0` to `5` | Number of top URLs to fetch with Jina Reader. Aliases accepted: `read_top_n`, `readerLimit`. |
-| `readerDelaySeconds` | No | `4` | `1` to `60` | Delay between Jina Reader requests. Alias accepted: `reader_delay_seconds`. |
-| `maxContentChars` | No | `6000` | `1000` to `50000` | Maximum number of characters kept from each Reader response. Alias accepted: `max_content_chars`. |
-| `country` | No | `US` | Brave-supported country code | Country parameter sent to Brave. |
-| `search_lang` | No | `en` | Brave-supported search language | Search language parameter sent to Brave. |
-| `ui_lang` | No | `en-US` | Brave-supported UI language | UI language parameter sent to Brave. |
-| `freshness` | No | empty string | empty, `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` | Optional freshness filter sent to Brave. |
-| `safesearch` | No | `moderate` | `off`, `moderate`, `strict` | Safe-search setting sent to Brave. |
+- `query`: `q`, `searchQuery`
+- `count`: `limit`
+- `maxContentChars`: `max_content_chars`
+- `requestTimeoutMs`: `request_timeout_ms`
+- `redisRateLimitKey`: `redis_rate_limit_key`
+- `rateLimitMaxRequests`: `rate_limit_max_requests`
+- `rateLimitWindowSeconds`: `rate_limit_window_seconds`
+- `rateLimitSleepBufferSeconds`: `rate_limit_sleep_buffer_seconds`
+- `maxAttempts`: `max_attempts`, `retryMaxAttempts`, `retry_max_attempts`, `retryCount`, `retry_count`, `retries`
+- `search_lang`: `searchLang`
+- `ui_lang`: `uiLang`
+
+Defaults and limits:
+
+| Field | Default | Limits / allowed values | Description |
+| --- | ---: | --- | --- |
+| `query` | none | non-empty string | Search query sent to Brave. |
+| `count` | `10` | `1` to `20` | Number of unique Brave candidates to fetch and enrich. |
+| `maxContentChars` | `6000` | `1000` to `200000` | Passed to the Jina Reader workflow for each URL. |
+| `requestTimeoutMs` | `60000` | `1000` to `300000` | Passed to the Jina Reader workflow for each URL. |
+| `redisRateLimitKey` | `jina_reader:free:rpm` | string | Passed to the Jina Reader workflow. |
+| `rateLimitMaxRequests` | `20` | `1` to `1000` | Passed to the Jina Reader workflow. |
+| `rateLimitWindowSeconds` | `60` | `1` to `3600` | Passed to the Jina Reader workflow. |
+| `rateLimitSleepBufferSeconds` | `5` | `0` to `3600` | Passed to the Jina Reader workflow. |
+| `maxAttempts` | `3` | `1` to `20` | Total Reader HTTP fetch attempts per URL. First fetch is attempt 1. |
+| `country` | `US` | Brave-supported country code | Country parameter sent to Brave. |
+| `search_lang` | `en` | Brave-supported search language | Search language parameter sent to Brave. |
+| `ui_lang` | `en-US` | Brave-supported UI language | UI language parameter sent to Brave. |
+| `freshness` | empty string | empty, `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` | Optional freshness filter sent to Brave. |
+| `safesearch` | `moderate` | `off`, `moderate`, `strict` | Safe-search setting sent to Brave. |
+
+`readTopN` and `readerDelaySeconds` are no longer part of the active contract. The workflow fetches content for all unique Brave candidates returned by `count`; delay and rate-limit behavior live in `Jina Reader - Fetch URL`.
 
 ## Output contract
 
-Successful responses use this top-level shape.
+Successful or partially successful responses use this top-level shape:
 
 ```json
 {
   "status": "ok",
-  "provider": "brave+jina_reader",
+  "provider": "brave+jina_reader_workflow",
   "query": "n8n execute sub-workflow trigger input data",
   "candidateCount": 10,
-  "recordCount": 3,
+  "recordCount": 10,
   "records": [],
   "request": {},
   "metadata": {},
-  "receivedAt": "2026-06-26T23:41:37.114Z"
+  "receivedAt": "2026-07-06T00:00:00.000Z"
 }
 ```
 
-### Output fields
-
-| Field | Description |
-| --- | --- |
-| `status` | `ok` or `error`. |
-| `provider` | Current value is `brave+jina_reader`. |
-| `query` | Normalized search query. |
-| `candidateCount` | Number of unique Brave candidates prepared by the workflow. |
-| `recordCount` | Number of records returned in `records`. In this version, this normally matches the Reader fetch count, not the full Brave candidate count. |
-| `records` | Array of normalized search result records enriched with Reader data when available. |
-| `request` | Normalized request settings used by the workflow. |
-| `metadata` | Runtime metadata such as Reader stats and strategy name. |
-| `receivedAt` | Timestamp when the final response was formatted. |
+If some Reader sub-workflow calls fail but Brave Search succeeds, the workflow returns `status: "partial_error"` and preserves all records with `reader.status: "error"` on failed records. If every Reader call fails, the workflow returns `status: "error"` with `records[]` still present so callers can inspect the Brave metadata and Reader errors.
 
 ### Record shape
 
-Each returned record has this general structure.
+Each returned record includes Brave metadata plus Reader output:
 
 ```json
 {
   "rank": 1,
-  "title": "Execute Sub-workflow | n8n Docs",
-  "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/",
+  "title": "Example result",
+  "url": "https://example.com/article",
   "description": "Search result description from Brave.",
-  "age": null,
-  "pageAge": null,
-  "language": "en",
-  "familyFriendly": true,
-  "extraSnippets": [],
-  "profile": null,
   "source": "brave:web",
-  "readerRank": 1,
+  "content": "Title: ...
+URL Source: ...
+
+Markdown Content: ...",
   "reader": {
     "status": "ok",
     "fetched": true,
     "provider": "jina_reader",
-    "readerUrl": "https://r.jina.ai/https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/",
+    "readerUrl": "https://r.jina.ai/https://example.com/article",
     "contentType": "markdown",
     "contentChars": 6000,
     "originalContentChars": 12000,
     "truncated": true,
-    "content": "Title: ...\nURL Source: ...\n\nMarkdown content..."
+    "content": "Title: ...
+URL Source: ...
+
+Markdown Content: ...",
+    "error": null,
+    "retry": {},
+    "rateLimit": {}
   }
 }
 ```
 
-Possible `reader.status` values:
+For downstream workflows, prefer `records[].content`. `records[].reader.content` is retained for compatibility with the older Brave workflow shape.
 
-| Status | Meaning |
-| --- | --- |
-| `ok` | Jina Reader returned content and the workflow attached it to the record. |
-| `error` | Jina Reader failed for that URL, but the workflow preserved the record and attached error details. |
-| `skipped` | The workflow did not fetch Reader content for the record, usually because no Reader URL was available or `readTopN` was `0`. |
+## Error behavior
 
-## Error response
+The workflow distinguishes between search-level errors and Reader-level errors:
 
-If the workflow fails before producing records, it returns a normalized error response.
+- Missing/invalid search input or Brave HTTP failure returns a normalized top-level `status: "error"` with no records.
+- Reader failures are returned inside each record at `record.reader.error` and summarized in `metadata.readerStats`, `metadata.readerFailureCount`, and `metadata.failedReaderRecords`.
+- The standalone Jina Reader workflow passes actual Reader error details through `retry.errors[]`, and this Brave workflow preserves that under `record.reader.retry`.
 
-```json
-{
-  "status": "error",
-  "provider": "brave+jina_reader",
-  "query": "example query",
-  "candidateCount": 0,
-  "recordCount": 0,
-  "records": [],
-  "error": {
-    "message": "Search workflow failed before producing results",
-    "name": null
-  },
-  "request": {},
-  "receivedAt": "2026-06-26T23:41:37.114Z"
-}
-```
+## Reader delegation and rate limits
 
-## Rate-limit behavior
+The Brave workflow intentionally delegates all Reader concerns to **Jina Reader - Fetch URL**:
 
-The workflow fetches Reader content one URL at a time and waits between Reader calls.
+- Redis simple-counter rate limiting.
+- Wait/backoff when the free Reader limit is hit.
+- Reader HTTP retry attempts.
+- Reader URL normalization and `https://r.jina.ai/${url}` construction.
+- Normalized Reader success/error responses.
 
-Default values:
-
-```json
-{
-  "readTopN": 3,
-  "readerDelaySeconds": 4,
-  "maxContentChars": 6000
-}
-```
-
-Keep `readTopN` small when using the free Jina Reader endpoint. For broader searches, prefer increasing `count` first and keeping `readTopN` between `3` and `5`.
-
-Recommended starting points:
-
-| Use case | `count` | `readTopN` | `readerDelaySeconds` | `maxContentChars` |
-| --- | ---: | ---: | ---: | ---: |
-| Fast smoke test | `5` | `1` | `4` | `3000` |
-| Normal AI grounding | `10` | `3` | `4` | `6000` |
-| Deeper research | `20` | `5` | `4` to `8` | `10000` |
-
-## Import checklist
-
-1. Import `web-search-brave-api-reader.workflow.json`.
-2. Open **Brave Web Search** and select the local Brave HTTP Header Auth credential.
-3. Save the main workflow.
-4. Import `test-web-search-brave-api-reader.workflow.json`.
-5. Open **Call Web Search Reader Workflow** and select the imported main workflow.
-6. Save the test workflow.
-7. Run the test workflow manually.
-8. Confirm the output has `status: "ok"`, `provider: "brave+jina_reader"`, and at least one record with `reader.status: "ok"`.
+Because the Reader sub-workflow handles rate limiting and sleeping internally, this Brave workflow now fetches content for every unique Brave result returned by `count` rather than limiting to the old `readTopN` subset.
 
 ## Development notes
 
-- Keep this workflow callable and focused on search + content enrichment.
+- Keep this workflow callable and focused on search + delegating content reads.
 - Keep the test workflow in the same directory and update it whenever the main workflow input contract changes.
-- Keep root `AI_CONTEXT.md` updated when external API behavior, rate-limit assumptions, or workflow design decisions change.
-- Do not create workflow-specific AI context files inside this directory.
+- Keep root `AI_CONTEXT.md` updated when external API behavior, rate-limit assumptions, workflow contracts, or design decisions change.
 - Do not hard-code API keys in workflow JSON. Use n8n credentials.
-- Reranking is intentionally not enabled yet. A future version can add a rerank step between Brave candidate collection and Jina Reader fetching.
-
-## Suggested directory layout
-
-```text
-AI_CONTEXT.md
-workflows/
-  web-search/
-    README.md
-    web-search-brave-api-reader.workflow.json
-    test-web-search-brave-api-reader.workflow.json
-```
+- Reranking is intentionally not enabled yet. A future version can add a rerank step after content is fetched for all candidates.
