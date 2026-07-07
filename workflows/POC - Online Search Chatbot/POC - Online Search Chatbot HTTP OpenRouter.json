@@ -1,0 +1,490 @@
+{
+  "name": "POC - Online Search Chatbot Step 1 - HTTP OpenRouter",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "de86a91c-4a32-4350-8a05-9b9faa73567d",
+      "name": "When clicking ‘Test workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        1424,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const userQuery = 'How long should I boil eggs for? And is it since putting them in the stove or time starts counting only after the water begins to boil?';\n\nconst searchQueryPrompt = [\n  'You convert user questions into concise web search queries.',\n  '',\n  'Return valid JSON only.',\n  '',\n  'Rules:',\n  '- Do not answer the user question.',\n  '- Create one search query that will retrieve trustworthy practical guidance.',\n  '- Prefer simple wording.',\n  '- Include key ambiguity from the user when relevant.',\n  '- Set count to 5 unless more results are clearly needed.',\n  '',\n  'User question:',\n  userQuery,\n  '',\n  'Return this exact JSON shape:',\n  JSON.stringify({\n    searchQuery: 'string',\n    count: 5,\n    country: 'US',\n    search_lang: 'en',\n    ui_lang: 'en-US',\n    freshness: '',\n    safesearch: 'moderate'\n  }, null, 2)\n].join('\\n');\n\nreturn {\n  json: {\n    userQuery,\n    searchQueryPrompt\n  }\n};"
+      },
+      "id": "5c276594-6bba-49c7-bc29-a82a484f2cad",
+      "name": "Hardcoded User Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const userQuery = $json.userQuery;\nconst searchQueryPrompt = $json.searchQueryPrompt;\n\nreturn {\n  json: {\n    userQuery,\n    searchQueryPrompt,\n    openRouterBody: {\n      model: 'deepseek/deepseek-v4-flash',\n      messages: [\n        {\n          role: 'system',\n          content: 'You are a search query planner. Return only valid JSON.'\n        },\n        {\n          role: 'user',\n          content: searchQueryPrompt\n        }\n      ],\n      response_format: { type: 'json_object' },\n      temperature: 0.1,\n      max_tokens: 300,\n      stream: false\n    }\n  }\n};"
+      },
+      "id": "e9216edc-4e06-4ef7-8f11-1915d41090dd",
+      "name": "Build Search Query Inference Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Title",
+              "value": "n8n Online Search Chatbot POC"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.openRouterBody }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "00e816c5-951e-4e42-822f-1d7e5e52329d",
+      "name": "OpenRouter - Format Search Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2144,
+        1792
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "e0P0Iod0nSljK5cQ",
+          "name": "OpenRouter header auth with bearer"
+        },
+        "httpBearerAuth": {
+          "id": "S5S1TOtzvC2Bz5uw",
+          "name": "OpenRouter bearer Auth"
+        }
+      },
+      "notes": "Use an HTTP Header Auth credential. Header Name: Authorization. Header Value: Bearer <your OpenRouter API key>. This avoids the OpenRouter Chat Model dropdown/options issue."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json || {};\nconst raw = response.choices?.[0]?.message?.content ?? response.output_text ?? response.text ?? '';\n\nlet parsed = {};\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n} catch (error) {\n  const match = String(raw).match(/\\{[\\s\\S]*\\}/);\n  if (match) {\n    try {\n      parsed = JSON.parse(match[0]);\n    } catch (_) {\n      parsed = {};\n    }\n  }\n}\n\nconst fallbackQuery = 'boil eggs how long start timer after water boils or when placed on stove';\nconst normalizeCount = (value) => {\n  const parsedCount = Number.parseInt(value, 10);\n  if (!Number.isFinite(parsedCount)) return 5;\n  return Math.min(10, Math.max(1, parsedCount));\n};\n\nreturn {\n  json: {\n    userQuery: $('Hardcoded User Query').first().json.userQuery,\n    searchQueryRawModelOutput: raw,\n    searchQuery: String(parsed.searchQuery || fallbackQuery).trim(),\n    count: normalizeCount(parsed.count),\n    maxContentChars: 8000,\n    requestTimeoutMs: 60000,\n    country: parsed.country || 'US',\n    search_lang: parsed.search_lang || 'en',\n    ui_lang: parsed.ui_lang || 'en-US',\n    freshness: parsed.freshness || '',\n    safesearch: parsed.safesearch || 'moderate'\n  }\n};"
+      },
+      "id": "d7e1146c-e6ca-4628-854a-31f2d2113eb5",
+      "name": "Parse Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "yE8wUNySkRxoR6qx",
+          "mode": "id",
+          "cachedResultName": "Web Search - Brave API + Jina Reader Workflow",
+          "cachedResultUrl": "/workflow/yE8wUNySkRxoR6qx"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $json.searchQuery }}",
+            "count": "={{ $json.count }}",
+            "maxContentChars": "={{ $json.maxContentChars }}",
+            "requestTimeoutMs": "={{ $json.requestTimeoutMs }}",
+            "country": "={{ $json.country }}",
+            "search_lang": "={{ $json.search_lang }}",
+            "ui_lang": "={{ $json.ui_lang }}",
+            "freshness": "={{ $json.freshness }}",
+            "safesearch": "={{ $json.safesearch }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "count",
+              "displayName": "count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "maxContentChars",
+              "displayName": "maxContentChars",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "requestTimeoutMs",
+              "displayName": "requestTimeoutMs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "country",
+              "displayName": "country",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "search_lang",
+              "displayName": "search_lang",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "ui_lang",
+              "displayName": "ui_lang",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "freshness",
+              "displayName": "freshness",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "safesearch",
+              "displayName": "safesearch",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "aa35b9be-e915-49cf-a760-3d626b544728",
+      "name": "Call Web Search Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2672,
+        1792
+      ],
+      "notes": "After import, reselect your local Web Search - Brave API + Jina Reader Workflow if this workflow ID is stale."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json || {};\nconst parsedSearch = $('Parse Search Query').first().json;\nconst records = Array.isArray(response.records) ? response.records : [];\n\nconst selectedRecords = records\n  .filter((record) => record && record.url)\n  .slice(0, 5)\n  .map((record, index) => ({\n    sourceNumber: index + 1,\n    rank: record.rank ?? index + 1,\n    title: record.title || '',\n    url: record.url,\n    description: record.description || '',\n    content: String(record.content || record.reader?.content || '').slice(0, 5000)\n  }));\n\nconst searchContext = selectedRecords.length\n  ? selectedRecords.map((record) => [\n      `SOURCE ${record.sourceNumber}`,\n      `Title: ${record.title}`,\n      `URL: ${record.url}`,\n      `Description: ${record.description}`,\n      'Content:',\n      record.content || '(No page content returned. Use title/description only if needed.)'\n    ].join('\\n')).join('\\n\\n---\\n\\n')\n  : '(No search records were returned.)';\n\nconst finalAnswerPrompt = [\n  'You answer user questions using only the provided web search sources.',\n  '',\n  'Rules:',\n  '- Answer the original question directly.',\n  '- Use the provided sources only.',\n  '- If sources disagree, say so briefly.',\n  '- Be practical and concise.',\n  '- Include timing guidance clearly.',\n  '- Explain whether the timer starts before or after boiling.',\n  '- Do not invent sources.',\n  '- Return valid JSON only.',\n  '',\n  'Original user question:',\n  parsedSearch.userQuery,\n  '',\n  'Search query used:',\n  parsedSearch.searchQuery,\n  '',\n  'Web search sources:',\n  searchContext,\n  '',\n  'Return this exact JSON shape:',\n  JSON.stringify({\n    answer: 'string',\n    sourceNumbersUsed: [1, 2],\n    confidence: 'high | medium | low'\n  }, null, 2)\n].join('\\n');\n\nreturn {\n  json: {\n    userQuery: parsedSearch.userQuery,\n    searchQuery: parsedSearch.searchQuery,\n    searchStatus: response.status || 'unknown',\n    recordCount: response.recordCount ?? records.length,\n    sourceCount: selectedRecords.length,\n    sources: selectedRecords.map(({ sourceNumber, rank, title, url }) => ({ sourceNumber, rank, title, url })),\n    searchContext,\n    finalAnswerPrompt,\n    rawSearchResponsePreview: {\n      status: response.status,\n      provider: response.provider,\n      candidateCount: response.candidateCount,\n      recordCount: response.recordCount,\n      metadata: response.metadata\n    }\n  }\n};"
+      },
+      "id": "50c5eddd-17e5-4d8c-989b-4de5fed57490",
+      "name": "Prepare Search Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prompt = $json.finalAnswerPrompt;\n\nreturn {\n  json: {\n    ...$json,\n    openRouterBody: {\n      model: 'deepseek/deepseek-v4-pro',\n      messages: [\n        {\n          role: 'system',\n          content: 'You answer using provided sources. Return only valid JSON.'\n        },\n        {\n          role: 'user',\n          content: prompt\n        }\n      ],\n      response_format: { type: 'json_object' },\n      temperature: 0.2,\n      max_tokens: 900,\n      stream: false\n    }\n  }\n};"
+      },
+      "id": "1ecd8b00-75f4-450c-b63f-a8f81cd2b68c",
+      "name": "Build Answer Inference Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3232,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Title",
+              "value": "n8n Online Search Chatbot POC"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.openRouterBody }}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "438e074a-eab2-406a-8769-154488803cbb",
+      "name": "OpenRouter - Generate Final Answer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3504,
+        1792
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "e0P0Iod0nSljK5cQ",
+          "name": "OpenRouter header auth with bearer"
+        },
+        "httpBearerAuth": {
+          "id": "S5S1TOtzvC2Bz5uw",
+          "name": "OpenRouter bearer Auth"
+        }
+      },
+      "notes": "Use the same HTTP Header Auth credential as the first OpenRouter HTTP node. Header Name: Authorization. Header Value: Bearer <your OpenRouter API key>."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json || {};\nconst raw = response.choices?.[0]?.message?.content ?? response.output_text ?? response.text ?? '';\n\nlet parsed = {};\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n} catch (error) {\n  const match = String(raw).match(/\\{[\\s\\S]*\\}/);\n  if (match) {\n    try {\n      parsed = JSON.parse(match[0]);\n    } catch (_) {\n      parsed = {};\n    }\n  }\n}\n\nconst prepared = $('Prepare Search Context').first().json;\nconst answer = String(parsed.answer || raw || '').trim();\n\nreturn {\n  json: {\n    status: answer ? 'ok' : 'error',\n    channel: 'poc_no_telegram_yet',\n    userQuery: prepared.userQuery,\n    searchQuery: prepared.searchQuery,\n    searchStatus: prepared.searchStatus,\n    recordCount: prepared.recordCount,\n    answer,\n    confidence: parsed.confidence || (answer ? 'medium' : 'low'),\n    sourceNumbersUsed: Array.isArray(parsed.sourceNumbersUsed) ? parsed.sourceNumbersUsed : [],\n    sources: prepared.sources,\n    debug: {\n      queryFormatterModel: 'deepseek/deepseek-v4-flash',\n      answerModel: 'deepseek/deepseek-v4-pro',\n      answerRawModelOutput: raw\n    }\n  }\n};"
+      },
+      "id": "9fe35b7a-dc82-4a35-a692-80af650abbf9",
+      "name": "Format POC Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3792,
+        1792
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## POC step 1 — HTTP OpenRouter version\nHardcoded user query → OpenRouter HTTP inference formats Brave query → existing Brave+Jina callable workflow → OpenRouter HTTP inference generates final answer.\n\nThis version avoids the OpenRouter Chat Model node/model dropdown.",
+        "height": 260,
+        "width": 460,
+        "color": 4
+      },
+      "id": "ebee1f4e-fad1-43aa-956c-12bef94e687a",
+      "name": "POC Overview Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1424,
+        1424
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## OpenRouter credential\nCreate an **HTTP Header Auth** credential, not an OpenRouter account credential.\n\nName: `Authorization`\nValue: `Bearer <your OpenRouter API key>`\n\nThen reselect it in both OpenRouter HTTP Request nodes.",
+        "height": 280,
+        "width": 520,
+        "color": 5
+      },
+      "id": "969a855d-d41c-4f25-8f4f-be3f86f40e50",
+      "name": "OpenRouter Credential Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2112,
+        1424
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## After import\n1. Reselect the OpenRouter HTTP Header Auth credential on both OpenRouter HTTP nodes.\n2. Open **Call Web Search Workflow** and select your local **Web Search - Brave API + Jina Reader Workflow**.\n3. Make sure that workflow has Brave configured and its Jina Reader sub-workflow selected.",
+        "height": 300,
+        "width": 560,
+        "color": 6
+      },
+      "id": "115c99ea-4afb-41a2-855e-8d1a0aa20efd",
+      "name": "Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2768,
+        1424
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Test workflow’": {
+      "main": [
+        [
+          {
+            "node": "Hardcoded User Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hardcoded User Query": {
+      "main": [
+        [
+          {
+            "node": "Build Search Query Inference Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Search Query Inference Request": {
+      "main": [
+        [
+          {
+            "node": "OpenRouter - Format Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter - Format Search Query": {
+      "main": [
+        [
+          {
+            "node": "Parse Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Search Query": {
+      "main": [
+        [
+          {
+            "node": "Call Web Search Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Web Search Workflow": {
+      "main": [
+        [
+          {
+            "node": "Prepare Search Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Search Context": {
+      "main": [
+        [
+          {
+            "node": "Build Answer Inference Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Answer Inference Request": {
+      "main": [
+        [
+          {
+            "node": "OpenRouter - Generate Final Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter - Generate Final Answer": {
+      "main": [
+        [
+          {
+            "node": "Format POC Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "d481350c-db75-4d22-97d0-42ac7740ac71",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "ZhahCzzB8xxUXmnv",
+  "tags": []
+}
