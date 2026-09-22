@@ -1,0 +1,829 @@
+{
+  "name": "Calendar Notifications - Scan Upcoming Events & Send Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "* * * * *"
+            }
+          ]
+        }
+      },
+      "id": "2f26840b-8631-4e37-adc1-430e1c5cc298",
+      "name": "Schedule - Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        3968,
+        992
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8c4525ff-462f-4503-aa49-d02ba3d9c984",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        3968,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT name, data FROM public.key_value_store WHERE name IN ('NEXCLOUD_BASE_URL', 'NEXCLOUD_CALENDAR_USER', 'NEXCLOUD_CALENDAR_PASSWORD', 'TIMEZONE', 'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD', 'REDIS_DATABASE', 'NOTIFICATIONS_USER', 'NOTIFICATIONS_PASSWORD', 'NOTIFICATIONS_BASE_URL', 'NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC')",
+        "options": {}
+      },
+      "id": "8efc1ee0-7cd3-4b9e-a911-fb7a8a76a49c",
+      "name": "Get Event Scan Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        4208,
+        1088
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((item) => item.json || {});\nconst values = {};\nconst present = new Set();\nfor (const row of rows) {\n  if (typeof row.name === 'string') {\n    present.add(row.name);\n    values[row.name] = row.data;\n  }\n}\n\nconst required = [\n  'NEXCLOUD_BASE_URL',\n  'NEXCLOUD_CALENDAR_USER',\n  'NEXCLOUD_CALENDAR_PASSWORD',\n  'TIMEZONE',\n  'REDIS_HOST',\n  'REDIS_PORT',\n  'REDIS_PASSWORD',\n  'REDIS_DATABASE',\n  'NOTIFICATIONS_USER',\n  'NOTIFICATIONS_PASSWORD',\n  'NOTIFICATIONS_BASE_URL',\n  'NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC',\n];\nconst missing = required.filter((key) => !present.has(key));\nif (missing.length) throw new Error(`Missing required public.key_value_store keys: ${missing.join(', ')}`);\n\nconst timezone = String(values.TIMEZONE ?? '').trim();\nconst nextcloudBaseUrl = String(values.NEXCLOUD_BASE_URL ?? '').trim().replace(/\\/+$/, '');\nconst user = String(values.NEXCLOUD_CALENDAR_USER ?? '').trim();\nconst password = String(values.NEXCLOUD_CALENDAR_PASSWORD ?? '');\nconst redisHost = String(values.REDIS_HOST ?? '').trim();\nconst redisPort = Number(values.REDIS_PORT);\nconst redisDatabase = Number(values.REDIS_DATABASE);\nconst notificationsUser = String(values.NOTIFICATIONS_USER ?? '').trim();\nconst notificationsPassword = String(values.NOTIFICATIONS_PASSWORD ?? '');\nconst notificationsBaseUrl = String(values.NOTIFICATIONS_BASE_URL ?? '').trim().replace(/\\/+$/, '');\nconst notificationsTopic = String(values.NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC ?? '').trim();\n\nif (!timezone || !nextcloudBaseUrl || !user || !redisHost) throw new Error('TIMEZONE, NEXCLOUD_BASE_URL, NEXCLOUD_CALENDAR_USER, and REDIS_HOST must not be empty');\nif (!/^https?:\\/\\/[^\\s/]+(?:\\/.*)?$/i.test(nextcloudBaseUrl)) throw new Error(`NEXCLOUD_BASE_URL must be an absolute HTTP(S) URL: ${nextcloudBaseUrl}`);\nif (!Number.isInteger(redisPort) || redisPort <= 0 || redisPort > 65535) throw new Error(`Invalid REDIS_PORT: ${values.REDIS_PORT}`);\nif (!Number.isInteger(redisDatabase) || redisDatabase < 0) throw new Error(`Invalid REDIS_DATABASE: ${values.REDIS_DATABASE}`);\nif (!notificationsUser || !notificationsPassword || !notificationsBaseUrl || !notificationsTopic) {\n  throw new Error('NOTIFICATIONS_USER, NOTIFICATIONS_PASSWORD, NOTIFICATIONS_BASE_URL, and NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC must not be empty');\n}\nif (!/^https?:\\/\\/[^\\s/]+(?:\\/.*)?$/i.test(notificationsBaseUrl)) throw new Error(`NOTIFICATIONS_BASE_URL must be an absolute HTTP(S) URL: ${notificationsBaseUrl}`);\ntry { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); }\ncatch { throw new Error(`TIMEZONE is not a valid IANA time zone: ${timezone}`); }\n\nconst partsAt = (ms, tz) => Object.fromEntries(\n  new Intl.DateTimeFormat('en-CA', {\n    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',\n  }).formatToParts(new Date(ms)).filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)])\n);\nconst zonedToUtc = (parts, tz) => {\n  const target = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour || 0, parts.minute || 0, parts.second || 0);\n  let guess = target;\n  for (let i = 0; i < 4; i++) {\n    const seen = partsAt(guess, tz);\n    const seenPseudo = Date.UTC(seen.year, seen.month - 1, seen.day, seen.hour || 0, seen.minute || 0, seen.second || 0);\n    const diff = target - seenPseudo;\n    guess += diff;\n    if (diff === 0) break;\n  }\n  return guess;\n};\nconst addLocalDays = (p, days) => {\n  const d = new Date(Date.UTC(p.year, p.month - 1, p.day + days));\n  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };\n};\nconst dateText = (p) => `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;\n\nconst nowMs = Date.now();\nconst local = partsAt(nowMs, timezone);\nconst todayParts = { year:local.year, month:local.month, day:local.day };\nconst tomorrowParts = addLocalDays(todayParts, 1);\nconst dayAfterTomorrowParts = addLocalDays(todayParts, 2);\nconst today = dateText(todayParts);\nconst tomorrow = dateText(tomorrowParts);\nconst startOfTodayMs = zonedToUtc({ ...todayParts, hour:0, minute:0, second:0 }, timezone);\nconst startOfTomorrowMs = zonedToUtc({ ...tomorrowParts, hour:0, minute:0, second:0 }, timezone);\nconst endOfTomorrowMs = zonedToUtc({ ...dayAfterTomorrowParts, hour:0, minute:0, second:0 }, timezone);\nconst ttlSeconds = Math.max(12 * 3600, Math.ceil((endOfTomorrowMs - nowMs) / 1000) + 6 * 3600);\nconst changeMessageTtlSeconds = 48 * 3600;\nconst sentMarkerTtlSeconds = 14 * 24 * 3600;\nconst reminderLookupMinutes = 5;\n\nreturn [{ json: {\n  nextcloud: { baseUrl: nextcloudBaseUrl, user, password },\n  notifications: {\n    user: notificationsUser,\n    password: notificationsPassword,\n    baseUrl: notificationsBaseUrl,\n    topic: notificationsTopic,\n  },\n  timezone,\n  redisExpected: {\n    host: redisHost,\n    port: redisPort,\n    database: redisDatabase,\n    passwordConfigured: String(values.REDIS_PASSWORD ?? '').length > 0,\n  },\n  reminderOffsetsMinutes: [30, 10, 1],\n  reminderGraceSeconds: 90,\n  reminderLookupMinutes,\n  changeMessageTtlSeconds,\n  sentMarkerTtlSeconds,\n  digest: {\n    targetDate: tomorrow,\n    dueNow: local.hour >= 21,\n    markerKey: `calendar-notifier:sent:v1:digest:${tomorrow}`,\n  },\n  scan: {\n    nowMs,\n    nowIso: new Date(nowMs).toISOString(),\n    localDate: today,\n    tomorrowDate: tomorrow,\n    startOfTodayMs,\n    startOfTodayIso: new Date(startOfTodayMs).toISOString(),\n    startOfTomorrowMs,\n    startOfTomorrowIso: new Date(startOfTomorrowMs).toISOString(),\n    endOfHorizonMs: endOfTomorrowMs,\n    endOfHorizonIso: new Date(endOfTomorrowMs).toISOString(),\n    sourceCacheKey: 'calendar-notifier:calendar-sources:v1',\n    stateKey: `calendar-notifier:scan-state:v1:${today}`,\n    ttlSeconds,\n  },\n} }];"
+      },
+      "id": "0ccd5206-0746-40f7-b4b5-6125cf7abb2b",
+      "name": "Format & Validate Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4448,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "calendarSourcesRaw",
+        "key": "calendar-notifier:calendar-sources:v1",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "a68d3da6-eae8-452f-8961-d23ab27420bb",
+      "name": "Get Calendar Sources",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        4720,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "previousStateRaw",
+        "key": "={{ $('Format & Validate Config').first().json.scan.stateKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "60361ff6-bc15-4e7a-bd0b-8d79fa6037bc",
+      "name": "Get Previous Scan State",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        4976,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst sourceRaw = $('Get Calendar Sources').first().json.calendarSourcesRaw;\nconst previousRaw = $input.first().json.previousStateRaw;\n\nconst parseJson = (raw, label, allowNull = false) => {\n  if (raw === null || raw === undefined || raw === '') {\n    if (allowNull) return null;\n    throw new Error(`${label} is empty`);\n  }\n  if (typeof raw === 'object') return raw;\n  try { return JSON.parse(String(raw)); }\n  catch (e) { throw new Error(`${label} is not valid JSON: ${e.message}`); }\n};\n\nconst sourceCache = parseJson(sourceRaw, `Redis source registry ${cfg.scan.sourceCacheKey}`, true);\nconst previousState = parseJson(previousRaw, `Redis scan state ${cfg.scan.stateKey}`, true) || {\n  schemaVersion: 1,\n  localDate: cfg.scan.localDate,\n  calendars: {},\n};\n\n// The source registry is persistent and refreshed by the discovery workflow.\n// If it is missing (for example before discovery has run once, or after a manual\n// Redis flush), this scanner must NOT interpret that as all calendars being\n// deleted. Emit a short-lived health record and perform no reconciliation.\nif (!sourceCache) {\n  const health = {\n    schemaVersion: 1,\n    component: 'event-scanner',\n    status: 'source_registry_missing',\n    observedAt: cfg.scan.nowIso,\n    sourceRegistryKey: cfg.scan.sourceCacheKey,\n    action: 'Run/activate the calendar discovery workflow. No event/reminder keys were deleted.',\n  };\n  return [{ json: {\n    status: 'skipped_source_registry_missing',\n    scannedAt: cfg.scan.nowIso,\n    localDate: cfg.scan.localDate,\n    timezone: cfg.timezone,\n    calendarCount: 0,\n    successfulCalendarCount: 0,\n    stalePreservedCalendarCount: 0,\n    errorCalendarCount: 0,\n    upcomingEventCount: 0,\n    reminderEntryCount: 0,\n    changedWriteCount: 1,\n    changeMessageCount: 0,\n    eventChangedMessageCount: 0,\n    eventDeletedMessageCount: 0,\n    deleteCount: 0,\n    errors: [],\n    warnings: [health.action],\n    redisPlan: {\n      deletes: [],\n      writes: [{\n        key: 'calendar-notifier:health:v1:event-scanner',\n        value: JSON.stringify(health),\n        ttlSeconds: 300,\n        category: 'scanner_health',\n      }],\n      stateWrite: null,\n    },\n    calendarRefs: [],\n    tomorrowDate: cfg.scan.tomorrowDate,\n    changeMessages: [],\n  } }];\n}\n\nif (!Array.isArray(sourceCache.calendars)) throw new Error('Calendar source registry does not contain a calendars array. Run the discovery workflow again.');\nif (sourceCache.schemaVersion !== 1) throw new Error(`Unsupported calendar source registry schemaVersion: ${sourceCache.schemaVersion}`);\n\nconst nowMs = Number(cfg.scan.nowMs);\nconst dayStartMs = Number(cfg.scan.startOfTodayMs);\nconst horizonEndMs = Number(cfg.scan.endOfHorizonMs);\nconst targetTimezone = cfg.timezone;\nconst offsets = cfg.reminderOffsetsMinutes;\nconst graceMs = Number(cfg.reminderGraceSeconds || 0) * 1000;\nconst ttlSeconds = Number(cfg.scan.ttlSeconds);\nconst changeMessageTtlSeconds = Number(cfg.changeMessageTtlSeconds || 172800);\nconst tomorrowDate = cfg.scan.tomorrowDate;\n\nconst bodyToText = (body) => {\n  if (body === undefined || body === null) return '';\n  if (typeof body === 'string') return body;\n  if (Buffer.isBuffer(body)) return body.toString('utf8');\n  if (typeof body === 'object') { try { return JSON.stringify(body); } catch { return String(body); } }\n  return String(body);\n};\nconst decodeXml = (value = '') => String(value)\n  .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n  .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '\"').replace(/&apos;/gi, \"'\")\n  .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n)))\n  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))\n  .replace(/&amp;/gi, '&');\nconst compact = (v, max = 900) => String(v || '').replace(/\\s+/g, ' ').trim().slice(0, max);\n\nconst fnv1a = (input) => {\n  let h = 0x811c9dc5;\n  const s = String(input ?? '');\n  for (let i = 0; i < s.length; i++) {\n    h ^= s.charCodeAt(i);\n    h = Math.imul(h, 0x01000193);\n  }\n  return (h >>> 0).toString(16).padStart(8, '0');\n};\nconst stableStringify = (value) => {\n  if (value === null || typeof value !== 'object') return JSON.stringify(value);\n  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;\n  const keys = Object.keys(value).sort();\n  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;\n};\n\nconst windowsZones = {\n  'UTC': 'Etc/UTC',\n  'Dateline Standard Time': 'Etc/GMT+12',\n  'Pacific Standard Time': 'America/Los_Angeles',\n  'US Mountain Standard Time': 'America/Phoenix',\n  'Mountain Standard Time': 'America/Denver',\n  'Central Standard Time': 'America/Chicago',\n  'Eastern Standard Time': 'America/New_York',\n  'Atlantic Standard Time': 'America/Halifax',\n  'Newfoundland Standard Time': 'America/St_Johns',\n  'GMT Standard Time': 'Europe/London',\n  'W. Europe Standard Time': 'Europe/Berlin',\n  'Central Europe Standard Time': 'Europe/Budapest',\n  'Romance Standard Time': 'Europe/Paris',\n  'E. Europe Standard Time': 'Europe/Chisinau',\n  'Turkey Standard Time': 'Europe/Istanbul',\n  'Russian Standard Time': 'Europe/Moscow',\n  'Israel Standard Time': 'Asia/Jerusalem',\n  'Arab Standard Time': 'Asia/Riyadh',\n  'India Standard Time': 'Asia/Kolkata',\n  'China Standard Time': 'Asia/Shanghai',\n  'Tokyo Standard Time': 'Asia/Tokyo',\n  'Korea Standard Time': 'Asia/Seoul',\n  'AUS Eastern Standard Time': 'Australia/Sydney',\n  'E. Australia Standard Time': 'Australia/Brisbane',\n  'New Zealand Standard Time': 'Pacific/Auckland',\n};\nconst timezoneCache = new Map();\nconst validTimezone = (tz) => {\n  if (!tz) return false;\n  if (timezoneCache.has(tz)) return timezoneCache.get(tz);\n  let ok = true;\n  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(new Date()); } catch { ok = false; }\n  timezoneCache.set(tz, ok);\n  return ok;\n};\nconst normalizeTimezone = (raw, fallback = targetTimezone) => {\n  if (!raw) return fallback;\n  let tz = String(raw).trim().replace(/^\"|\"$/g, '');\n  tz = windowsZones[tz] || tz;\n  tz = tz.replace(/^\\/freeassociation\\.sourceforge\\.net\\/Tzfile\\//i, '');\n  if (validTimezone(tz)) return tz;\n  const iana = tz.match(/(?:Africa|America|Antarctica|Asia|Atlantic|Australia|Europe|Indian|Pacific)\\/[A-Za-z0-9_+\\-\\/]+/);\n  if (iana && validTimezone(iana[0])) return iana[0];\n  return fallback;\n};\nconst partsAt = (ms, tz) => Object.fromEntries(\n  new Intl.DateTimeFormat('en-CA', {\n    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',\n  }).formatToParts(new Date(ms)).filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)])\n);\nconst zonedToUtc = (p, tz) => {\n  const target = Date.UTC(p.year, p.month - 1, p.day, p.hour || 0, p.minute || 0, p.second || 0);\n  let guess = target;\n  for (let i = 0; i < 4; i++) {\n    const seen = partsAt(guess, tz);\n    const seenPseudo = Date.UTC(seen.year, seen.month - 1, seen.day, seen.hour || 0, seen.minute || 0, seen.second || 0);\n    const diff = target - seenPseudo;\n    guess += diff;\n    if (diff === 0) break;\n  }\n  return guess;\n};\nconst dateKeyInZone = (ms, tz) => {\n  const p = partsAt(ms, tz);\n  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;\n};\nconst formatLocal = (ms, tz) => {\n  const p = partsAt(ms, tz);\n  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}T${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}:${String(p.second).padStart(2, '0')}`;\n};\nconst localDateMath = (p, days = 0) => {\n  const d = new Date(Date.UTC(p.year, p.month - 1, p.day + days));\n  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };\n};\nconst localDayNumber = (p) => Math.floor(Date.UTC(p.year, p.month - 1, p.day) / 86400000);\nconst weekday = (p) => new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay(); // 0=SU\nconst daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();\n\nconst unfoldIcs = (text) => String(text || '').replace(/\\r\\n[ \\t]/g, '').replace(/\\n[ \\t]/g, '').replace(/\\r/g, '').split('\\n');\nconst splitOutsideQuotes = (text, delimiter) => {\n  const out = []; let cur = ''; let quoted = false;\n  for (let i = 0; i < text.length; i++) {\n    const ch = text[i];\n    if (ch === '\"') quoted = !quoted;\n    if (ch === delimiter && !quoted) { out.push(cur); cur = ''; } else cur += ch;\n  }\n  out.push(cur); return out;\n};\nconst parseProperty = (line) => {\n  let quoted = false, colon = -1;\n  for (let i = 0; i < line.length; i++) {\n    if (line[i] === '\"') quoted = !quoted;\n    if (line[i] === ':' && !quoted) { colon = i; break; }\n  }\n  if (colon < 0) return null;\n  const left = line.slice(0, colon);\n  const value = line.slice(colon + 1);\n  const pieces = splitOutsideQuotes(left, ';');\n  const name = pieces.shift().toUpperCase();\n  const params = {};\n  for (const piece of pieces) {\n    const eq = piece.indexOf('=');\n    if (eq < 0) continue;\n    const key = piece.slice(0, eq).toUpperCase();\n    params[key] = piece.slice(eq + 1).replace(/^\"|\"$/g, '');\n  }\n  return { name, params, value };\n};\nconst unescapeText = (v) => decodeXml(String(v || ''))\n  .replace(/\\\\n/gi, '\\n').replace(/\\\\,/g, ',').replace(/\\\\;/g, ';').replace(/\\\\\\\\/g, '\\\\');\n\nconst parseDateProp = (prop, fallbackTz) => {\n  if (!prop) return null;\n  let value = String(prop.value || '').trim();\n  if (value.includes('/')) value = value.split('/')[0];\n  const valueType = String(prop.params?.VALUE || '').toUpperCase();\n  const allDay = valueType === 'DATE' || /^\\d{8}$/.test(value);\n  let m;\n  if ((m = value.match(/^(\\d{4})(\\d{2})(\\d{2})$/))) {\n    const tz = normalizeTimezone(prop.params?.TZID, fallbackTz);\n    const local = { year:+m[1], month:+m[2], day:+m[3], hour:0, minute:0, second:0 };\n    return { ms: zonedToUtc(local, tz), timezone: tz, allDay: true, local };\n  }\n  if ((m = value.match(/^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})?Z$/i))) {\n    const local = { year:+m[1], month:+m[2], day:+m[3], hour:+m[4], minute:+m[5], second:+(m[6] || 0) };\n    return { ms: Date.UTC(local.year, local.month-1, local.day, local.hour, local.minute, local.second), timezone:'Etc/UTC', allDay:false, local };\n  }\n  if ((m = value.match(/^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})?([+-])(\\d{2})(\\d{2})$/))) {\n    const local = { year:+m[1], month:+m[2], day:+m[3], hour:+m[4], minute:+m[5], second:+(m[6] || 0) };\n    const sign = m[7] === '+' ? 1 : -1;\n    const offset = sign * ((+m[8])*60 + (+m[9])) * 60000;\n    return { ms: Date.UTC(local.year,local.month-1,local.day,local.hour,local.minute,local.second)-offset, timezone:null, allDay:false, local };\n  }\n  if ((m = value.match(/^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})?$/))) {\n    const tz = normalizeTimezone(prop.params?.TZID, fallbackTz);\n    const local = { year:+m[1], month:+m[2], day:+m[3], hour:+m[4], minute:+m[5], second:+(m[6] || 0) };\n    return { ms: zonedToUtc(local, tz), timezone:tz, allDay:false, local };\n  }\n  return null;\n};\nconst parseDurationMs = (value) => {\n  const m = String(value || '').trim().match(/^([+-])?P(?:(\\d+)W)?(?:(\\d+)D)?(?:T(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?)?$/i);\n  if (!m) return null;\n  const sign = m[1] === '-' ? -1 : 1;\n  return sign * (((+m[2]||0)*7 + (+m[3]||0))*86400000 + (+m[4]||0)*3600000 + (+m[5]||0)*60000 + (+m[6]||0)*1000);\n};\n\nconst parseCalendar = (icsText, calendar) => {\n  const lines = unfoldIcs(icsText);\n  let calendarTz = targetTimezone;\n  for (const line of lines) {\n    const p = parseProperty(line);\n    if (p?.name === 'X-WR-TIMEZONE') { calendarTz = normalizeTimezone(unescapeText(p.value), targetTimezone); break; }\n  }\n  const events = [];\n  let current = null;\n  let nestedDepth = 0;\n  for (const line of lines) {\n    const upper = line.toUpperCase();\n    if (upper === 'BEGIN:VEVENT') { current = []; nestedDepth = 0; continue; }\n    if (!current) continue;\n    if (upper.startsWith('BEGIN:')) { nestedDepth++; continue; }\n    if (upper.startsWith('END:') && upper !== 'END:VEVENT') { if (nestedDepth > 0) nestedDepth--; continue; }\n    if (upper === 'END:VEVENT') {\n      const props = current.map(parseProperty).filter(Boolean);\n      const getAll = (name) => props.filter((p) => p.name === name);\n      const getOne = (name) => getAll(name)[0] || null;\n      const start = parseDateProp(getOne('DTSTART'), calendarTz);\n      const recurrenceId = parseDateProp(getOne('RECURRENCE-ID'), start?.timezone || calendarTz);\n      const endProp = parseDateProp(getOne('DTEND'), start?.timezone || calendarTz);\n      let durationMs = parseDurationMs(getOne('DURATION')?.value);\n      if (durationMs === null) {\n        if (start && endProp) durationMs = Math.max(0, endProp.ms - start.ms);\n        else durationMs = start?.allDay ? 86400000 : 0;\n      }\n      const exdates = [];\n      for (const p of getAll('EXDATE')) {\n        for (const v of splitOutsideQuotes(p.value, ',')) {\n          const parsed = parseDateProp({ ...p, value:v }, start?.timezone || calendarTz);\n          if (parsed) exdates.push(parsed.ms);\n        }\n      }\n      const rdates = [];\n      for (const p of getAll('RDATE')) {\n        for (const v of splitOutsideQuotes(p.value, ',')) {\n          const parsed = parseDateProp({ ...p, value:v }, start?.timezone || calendarTz);\n          if (parsed) rdates.push(parsed.ms);\n        }\n      }\n      const extraMeetingValues = props\n        .filter((p) => /(?:URL|LOCATION|DESCRIPTION|CONFERENCE|HANGOUT|TEAMS|ONLINE|MEETING)/.test(p.name))\n        .map((p) => unescapeText(p.value));\n      events.push({\n        uid: unescapeText(getOne('UID')?.value || ''),\n        summary: unescapeText(getOne('SUMMARY')?.value || '(Untitled event)'),\n        description: unescapeText(getOne('DESCRIPTION')?.value || ''),\n        location: unescapeText(getOne('LOCATION')?.value || ''),\n        url: unescapeText(getOne('URL')?.value || ''),\n        status: String(getOne('STATUS')?.value || 'CONFIRMED').toUpperCase(),\n        sequence: Number(getOne('SEQUENCE')?.value || 0),\n        lastModified: getOne('LAST-MODIFIED')?.value || null,\n        start, recurrenceId, durationMs, exdates, rdates,\n        rrule: getOne('RRULE')?.value || null,\n        meetingValues: extraMeetingValues,\n        calendarTz,\n      });\n      current = null;\n      continue;\n    }\n    if (nestedDepth === 0) current.push(line);\n  }\n  return events.filter((e) => e.uid && e.start);\n};\n\nconst parseRrule = (value) => {\n  if (!value) return null;\n  const rule = {};\n  for (const part of String(value).split(';')) {\n    const eq = part.indexOf('='); if (eq < 0) continue;\n    rule[part.slice(0,eq).toUpperCase()] = part.slice(eq+1);\n  }\n  rule.FREQ = String(rule.FREQ || '').toUpperCase();\n  rule.INTERVAL = Math.max(1, Number(rule.INTERVAL || 1));\n  if (rule.COUNT !== undefined) rule.COUNT = Math.max(0, Number(rule.COUNT));\n  return rule;\n};\nconst dayCodes = { SU:0, MO:1, TU:2, WE:3, TH:4, FR:5, SA:6 };\nconst parseByDay = (text) => String(text || '').split(',').filter(Boolean).map((token) => {\n  const m = token.match(/^([+-]?\\d+)?(SU|MO|TU|WE|TH|FR|SA)$/i);\n  return m ? { ordinal: m[1] ? Number(m[1]) : null, weekday: dayCodes[m[2].toUpperCase()] } : null;\n}).filter(Boolean);\nconst nthWeekdayOfMonth = (year, month, wd, ordinal) => {\n  const dim = daysInMonth(year, month);\n  if (ordinal > 0) {\n    const firstWd = weekday({year,month,day:1});\n    const day = 1 + ((wd - firstWd + 7) % 7) + (ordinal - 1) * 7;\n    return day <= dim ? day : null;\n  }\n  const lastWd = weekday({year,month,day:dim});\n  const day = dim - ((lastWd - wd + 7) % 7) + (ordinal + 1) * 7;\n  return day >= 1 ? day : null;\n};\nconst monthCandidateDays = (year, month, startDay, rule) => {\n  const dim = daysInMonth(year, month);\n  const byMonthDay = String(rule.BYMONTHDAY || '').split(',').filter(Boolean).map(Number).filter(Number.isFinite);\n  const byDay = parseByDay(rule.BYDAY);\n  let days = [];\n  if (byMonthDay.length) {\n    days = byMonthDay.map((n) => n > 0 ? n : dim + n + 1).filter((d) => d >= 1 && d <= dim);\n  } else if (byDay.length) {\n    for (const spec of byDay) {\n      if (spec.ordinal) {\n        const d = nthWeekdayOfMonth(year, month, spec.weekday, spec.ordinal);\n        if (d) days.push(d);\n      } else {\n        for (let d = 1; d <= dim; d++) if (weekday({year,month,day:d}) === spec.weekday) days.push(d);\n      }\n    }\n  } else if (startDay <= dim) days = [startDay];\n\n  if (byMonthDay.length && byDay.length) {\n    const allowed = new Set();\n    for (const spec of byDay) {\n      if (spec.ordinal) { const d = nthWeekdayOfMonth(year,month,spec.weekday,spec.ordinal); if (d) allowed.add(d); }\n      else for (let d=1; d<=dim; d++) if (weekday({year,month,day:d})===spec.weekday) allowed.add(d);\n    }\n    days = days.filter((d) => allowed.has(d));\n  }\n  days = [...new Set(days)].sort((a,b)=>a-b);\n  const bySetPos = String(rule.BYSETPOS || '').split(',').filter(Boolean).map(Number).filter(Number.isFinite);\n  if (bySetPos.length) {\n    const selected = [];\n    for (const pos of bySetPos) {\n      const idx = pos > 0 ? pos - 1 : days.length + pos;\n      if (idx >= 0 && idx < days.length) selected.push(days[idx]);\n    }\n    days = [...new Set(selected)];\n  }\n  return days;\n};\nconst parseUntil = (rule, master) => {\n  if (!rule?.UNTIL) return null;\n  const parsed = parseDateProp({ name:'UNTIL', params:{}, value:rule.UNTIL }, master.start.timezone || master.calendarTz);\n  if (!parsed) return null;\n  return parsed.allDay ? parsed.ms + 86400000 - 1 : parsed.ms;\n};\n\nconst expandMaster = (master, rangeStart, rangeEnd, warnings) => {\n  const rule = parseRrule(master.rrule);\n  const out = [];\n  const seen = new Set();\n  const ex = new Set(master.exdates.map(String));\n  const add = (ms, recurrenceBaseMs = ms) => {\n    if (!Number.isFinite(ms) || seen.has(ms)) return;\n    seen.add(ms);\n    out.push({ startMs: ms, recurrenceBaseMs });\n  };\n  if (!rule) { add(master.start.ms); for (const ms of master.rdates) add(ms); return out; }\n\n  const tz = master.start.timezone || master.calendarTz || targetTimezone;\n  const startLocal = partsAt(master.start.ms, tz);\n  const untilMs = parseUntil(rule, master);\n  const maxCount = Number.isFinite(rule.COUNT) ? rule.COUNT : Infinity;\n  let emittedCount = 0;\n  let iterations = 0;\n  const maxIterations = 50000;\n  const byMonth = new Set(String(rule.BYMONTH || '').split(',').filter(Boolean).map(Number));\n  const byMonthDay = String(rule.BYMONTHDAY || '').split(',').filter(Boolean).map(Number);\n  const byDay = parseByDay(rule.BYDAY);\n  const acceptCommon = (local) => {\n    if (byMonth.size && !byMonth.has(local.month)) return false;\n    if (byMonthDay.length) {\n      const dim = daysInMonth(local.year, local.month);\n      const vals = byMonthDay.map((n) => n > 0 ? n : dim + n + 1);\n      if (!vals.includes(local.day)) return false;\n    }\n    if (byDay.length && !byDay.some((d) => d.weekday === weekday(local))) return false;\n    return true;\n  };\n  const emitCandidate = (local) => {\n    if (iterations++ > maxIterations) throw new Error(`Recurrence expansion exceeded ${maxIterations} candidates for UID ${master.uid}`);\n    if (!acceptCommon(local)) return false;\n    const ms = zonedToUtc(local, tz);\n    if (ms < master.start.ms) return false;\n    if (untilMs !== null && ms > untilMs) return 'stop';\n    emittedCount++;\n    if (emittedCount > maxCount) return 'stop';\n    if (!ex.has(String(ms))) add(ms);\n    return false;\n  };\n\n  const stopAfterRange = (ms) => ms > rangeEnd + 2 * 86400000 && emittedCount >= maxCount;\n\n  if (rule.FREQ === 'DAILY') {\n    for (let n = 0; ; n++) {\n      const base = localDateMath(startLocal, n * rule.INTERVAL);\n      const local = { ...base, hour:startLocal.hour, minute:startLocal.minute, second:startLocal.second };\n      const approxMs = zonedToUtc(local, tz);\n      if (untilMs !== null && approxMs > untilMs) break;\n      if (approxMs > rangeEnd + 86400000 && emittedCount >= Math.min(maxCount, 1)) break;\n      const stop = emitCandidate(local); if (stop === 'stop') break;\n    }\n  } else if (rule.FREQ === 'WEEKLY') {\n    const wkst = dayCodes[String(rule.WKST || 'MO').toUpperCase()] ?? 1;\n    const startWd = weekday(startLocal);\n    const deltaToWeekStart = (startWd - wkst + 7) % 7;\n    const week0 = localDateMath(startLocal, -deltaToWeekStart);\n    const specs = byDay.length ? byDay : [{ weekday:startWd, ordinal:null }];\n    const sortedSpecs = [...specs].sort((a,b) => ((a.weekday-wkst+7)%7)-((b.weekday-wkst+7)%7));\n    outer: for (let w=0;;w++) {\n      const weekStart = localDateMath(week0, w * rule.INTERVAL * 7);\n      for (const spec of sortedSpecs) {\n        const localDate = localDateMath(weekStart, (spec.weekday - wkst + 7) % 7);\n        const local = { ...localDate, hour:startLocal.hour, minute:startLocal.minute, second:startLocal.second };\n        const ms = zonedToUtc(local, tz);\n        if (untilMs !== null && ms > untilMs) break outer;\n        if (ms > rangeEnd + 8*86400000 && emittedCount >= Math.min(maxCount,1)) break outer;\n        const stop = emitCandidate(local); if (stop === 'stop') break outer;\n      }\n    }\n  } else if (rule.FREQ === 'MONTHLY') {\n    const startIndex = startLocal.year * 12 + (startLocal.month - 1);\n    outer: for (let n=0;;n++) {\n      const idx = startIndex + n * rule.INTERVAL;\n      const year = Math.floor(idx / 12), month = (idx % 12) + 1;\n      if (byMonth.size && !byMonth.has(month)) continue;\n      const days = monthCandidateDays(year, month, startLocal.day, rule);\n      for (const day of days) {\n        const local = { year, month, day, hour:startLocal.hour, minute:startLocal.minute, second:startLocal.second };\n        const ms = zonedToUtc(local, tz);\n        if (untilMs !== null && ms > untilMs) break outer;\n        if (ms > rangeEnd + 35*86400000 && emittedCount >= Math.min(maxCount,1)) break outer;\n        const stop = emitCandidate(local); if (stop === 'stop') break outer;\n      }\n    }\n  } else if (rule.FREQ === 'YEARLY') {\n    outer: for (let n=0;;n++) {\n      const year = startLocal.year + n * rule.INTERVAL;\n      const months = byMonth.size ? [...byMonth].sort((a,b)=>a-b) : [startLocal.month];\n      for (const month of months) {\n        const days = monthCandidateDays(year, month, startLocal.day, rule);\n        for (const day of days) {\n          const local = { year, month, day, hour:startLocal.hour, minute:startLocal.minute, second:startLocal.second };\n          const ms = zonedToUtc(local, tz);\n          if (untilMs !== null && ms > untilMs) break outer;\n          if (ms > rangeEnd + 370*86400000 && emittedCount >= Math.min(maxCount,1)) break outer;\n          const stop = emitCandidate(local); if (stop === 'stop') break outer;\n        }\n      }\n    }\n  } else if (rule.FREQ === 'HOURLY' || rule.FREQ === 'MINUTELY') {\n    const step = rule.INTERVAL * (rule.FREQ === 'HOURLY' ? 3600000 : 60000);\n    for (let ms = master.start.ms; ; ms += step) {\n      if (iterations++ > maxIterations) throw new Error(`Recurrence expansion exceeded ${maxIterations} candidates for UID ${master.uid}`);\n      if (untilMs !== null && ms > untilMs) break;\n      emittedCount++;\n      if (emittedCount > maxCount) break;\n      if (!ex.has(String(ms))) add(ms);\n      if (ms > rangeEnd + step) break;\n    }\n  } else {\n    warnings.push(`UID ${master.uid}: unsupported RRULE FREQ=${rule.FREQ}; only DTSTART/RDATE were considered.`);\n    add(master.start.ms);\n  }\n\n  for (const ms of master.rdates) if (!ex.has(String(ms))) add(ms);\n  return out;\n};\n\nconst eventJoinLink = (event) => {\n  const haystack = [event.url, event.location, event.description, ...(event.meetingValues || [])].filter(Boolean).join('\\n');\n  const urls = haystack.match(/https?:\\/\\/[^\\s<>\"']+/gi) || [];\n  const cleaned = urls.map((u) => decodeXml(u).replace(/[),.;]+$/g, ''));\n  const google = cleaned.find((u) => /https?:\\/\\/(?:meet\\.google\\.com|g\\.co\\/meet)\\//i.test(u));\n  if (google) return { url:google, type:'google_meet' };\n  const teams = cleaned.find((u) => /https?:\\/\\/(?:teams\\.microsoft\\.com\\/(?:l\\/meetup-join|meet)|teams\\.live\\.com\\/meet)\\//i.test(u));\n  if (teams) return { url:teams, type:'microsoft_teams' };\n  return { url:null, type:null };\n};\n\nconst chooseNewest = (items) => [...items].sort((a,b) => (b.sequence-a.sequence) || String(b.lastModified||'').localeCompare(String(a.lastModified||'')))[0];\nconst materializeOccurrences = (parsedEvents, calendar, warnings) => {\n  const groups = new Map();\n  for (const event of parsedEvents) {\n    if (!groups.has(event.uid)) groups.set(event.uid, []);\n    groups.get(event.uid).push(event);\n  }\n  const occurrences = [];\n  for (const [uid, items] of groups) {\n    const masters = items.filter((e) => !e.recurrenceId);\n    const overrides = items.filter((e) => e.recurrenceId);\n    const overrideMap = new Map();\n    for (const o of overrides) {\n      const key = String(o.recurrenceId.ms);\n      const existing = overrideMap.get(key);\n      if (!existing || chooseNewest([o, existing]) === o) overrideMap.set(key, o);\n    }\n    const usedOverrides = new Set();\n    if (masters.length) {\n      const master = chooseNewest(masters);\n      const generated = expandMaster(master, dayStartMs, horizonEndMs, warnings);\n      for (const generatedOccurrence of generated) {\n        const originalMs = generatedOccurrence.recurrenceBaseMs;\n        const override = overrideMap.get(String(originalMs));\n        let source = master;\n        let startMs = generatedOccurrence.startMs;\n        let recurrenceIdentityMs = originalMs;\n        if (override) {\n          usedOverrides.add(String(originalMs));\n          if (override.status === 'CANCELLED') continue;\n          source = override;\n          startMs = override.start.ms;\n        }\n        if (source.status === 'CANCELLED') continue;\n        if (startMs < dayStartMs || startMs >= horizonEndMs) continue;\n        const join = eventJoinLink(source);\n        occurrences.push({ source, startMs, endMs:startMs + Math.max(0, Number(source.durationMs || master.durationMs || 0)), recurrenceIdentityMs, join });\n      }\n    }\n    for (const override of overrides) {\n      const key = String(override.recurrenceId.ms);\n      if (usedOverrides.has(key) || override.status === 'CANCELLED') continue;\n      const startMs = override.start.ms;\n      if (startMs < dayStartMs || startMs >= horizonEndMs) continue;\n      const join = eventJoinLink(override);\n      occurrences.push({ source:override, startMs, endMs:startMs + Math.max(0, Number(override.durationMs || 0)), recurrenceIdentityMs:override.recurrenceId.ms, join });\n    }\n  }\n\n  const dedupe = new Map();\n  for (const o of occurrences) {\n    const key = `${o.source.uid}|${o.recurrenceIdentityMs}|${o.startMs}`;\n    const existing = dedupe.get(key);\n    if (!existing || chooseNewest([o.source, existing.source]) === o.source) dedupe.set(key, o);\n  }\n  return [...dedupe.values()].sort((a,b)=>a.startMs-b.startMs);\n};\n\nconst fetchCalendarIcs = async (calendar) => {\n  if (calendar.kind === 'nextcloud_caldav') {\n    if (!calendar.caldavUrl) throw new Error('Missing caldavUrl');\n    const rangeStart = new Date(dayStartMs).toISOString().replace(/[-:]/g,'').replace(/\\.\\d{3}Z$/, 'Z');\n    const rangeEnd = new Date(horizonEndMs).toISOString().replace(/[-:]/g,'').replace(/\\.\\d{3}Z$/, 'Z');\n    const reportBody = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<c:calendar-query xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\\n  <d:prop><d:getetag/><c:calendar-data/></d:prop>\\n  <c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"VEVENT\"><c:time-range start=\"${rangeStart}\" end=\"${rangeEnd}\"/></c:comp-filter></c:comp-filter></c:filter>\\n</c:calendar-query>`;\n    const res = await this.helpers.httpRequest({\n      method:'REPORT', url:calendar.caldavUrl,\n      auth:{ username:cfg.nextcloud.user, password:cfg.nextcloud.password },\n      headers:{ Depth:'1', Accept:'application/xml, text/xml;q=0.9, */*;q=0.1', 'Content-Type':'application/xml; charset=UTF-8' },\n      body:reportBody, encoding:'text', timeout:30000, returnFullResponse:true, ignoreHttpStatusErrors:true,\n    });\n    const status = Number(res?.statusCode || 0);\n    const xml = bodyToText(res?.body);\n    if (status < 200 || status >= 300) throw new Error(`CalDAV REPORT returned HTTP ${status || 'unknown'}: ${compact(xml) || '(empty body)'}`);\n    const blocks = [...xml.matchAll(/<(?:\\w+:)?calendar-data\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?calendar-data>/gi)].map((m)=>decodeXml(m[1]));\n    return blocks.join('\\r\\n');\n  }\n\n  if (calendar.kind === 'subscription_ics') {\n    if (!calendar.icsUrl) throw new Error('Missing icsUrl');\n    const res = await this.helpers.httpRequest({\n      method:'GET', url:calendar.icsUrl,\n      headers:{ Accept:'text/calendar, text/plain;q=0.9, */*;q=0.1' },\n      encoding:'text', timeout:30000, returnFullResponse:true, ignoreHttpStatusErrors:true,\n    });\n    const status = Number(res?.statusCode || 0);\n    const body = bodyToText(res?.body);\n    if (status < 200 || status >= 300) throw new Error(`ICS fetch returned HTTP ${status || 'unknown'}: ${compact(body) || '(empty body)'}`);\n    if (!/BEGIN:VCALENDAR/i.test(body)) throw new Error(`ICS response is not a VCALENDAR document: ${compact(body)}`);\n    return body;\n  }\n  throw new Error(`Unsupported calendar kind: ${calendar.kind}`);\n};\n\nconst normalizedEventForOccurrence = (occ, calendar, calendarId) => {\n  const source = occ.source;\n  const recurrenceToken = source.recurrenceId?.ms ?? occ.recurrenceIdentityMs ?? occ.startMs;\n  const recurring = Boolean(source.recurrenceId || source.rrule || (source.rdates && source.rdates.length) || (source.exdates && source.exdates.length));\n  const changeIdentity = recurring ? `${source.uid}|r:${recurrenceToken}` : `${source.uid}|single`;\n  const occurrenceHash = fnv1a(`${source.uid}|${recurrenceToken}`);\n  const eventKey = `calendar-notifier:event:v1:${calendarId}:${occurrenceHash}`;\n  return {\n    schemaVersion:1,\n    eventKey,\n    changeIdentity,\n    calendarId,\n    calendarName:calendar.displayName,\n    calendarKind:calendar.kind,\n    uid:source.uid,\n    recurrenceIdUtc:new Date(recurrenceToken).toISOString(),\n    title:source.summary,\n    description:source.description,\n    location:source.location,\n    status:source.status,\n    sequence:source.sequence,\n    startUtc:new Date(occ.startMs).toISOString(),\n    endUtc:new Date(occ.endMs).toISOString(),\n    startLocal:formatLocal(occ.startMs, targetTimezone),\n    endLocal:formatLocal(occ.endMs, targetTimezone),\n    timezone:targetTimezone,\n    originalTimezone:source.start.timezone || source.calendarTz || null,\n    allDay:Boolean(source.start.allDay),\n    meetingUrl:occ.join.url,\n    meetingType:occ.join.type,\n    sourceUrl:calendar.icsUrl,\n  };\n};\n\nconst comparisonSnapshot = (event) => ({\n  identity:event.changeIdentity,\n  uid:event.uid,\n  recurrenceIdUtc:event.recurrenceIdUtc,\n  eventKey:event.eventKey,\n  title:event.title || '',\n  startUtc:event.startUtc,\n  endUtc:event.endUtc,\n  location:event.location || '',\n  meetingUrl:event.meetingUrl || null,\n  meetingType:event.meetingType || null,\n  allDay:Boolean(event.allDay),\n});\n\nconst changeFieldMap = {\n  title:'title', startUtc:'start_time', endUtc:'end_time', location:'location',\n  meetingUrl:'meeting_link', meetingType:'meeting_type', allDay:'all_day',\n};\nconst diffSnapshots = (before, after) => Object.keys(changeFieldMap)\n  .filter((field) => stableStringify(before?.[field] ?? null) !== stableStringify(after?.[field] ?? null))\n  .map((field) => changeFieldMap[field]);\nconst transitionRelevantNow = (before, after) => {\n  const beforeMs = Date.parse(before?.startUtc || '');\n  const afterMs = Date.parse(after?.startUtc || '');\n  return (Number.isFinite(beforeMs) && beforeMs > nowMs - graceMs) || (Number.isFinite(afterMs) && afterMs > nowMs - graceMs);\n};\nconst dualHash = (value) => `${fnv1a(value)}${fnv1a(`calendar-change:${value}`)}`;\nconst buildChangeMessageWrite = (messageType, reason, calendar, calendarId, before, after, changedFields = []) => {\n  const core = {\n    schemaVersion:1,\n    messageType,\n    reason,\n    createdAt:cfg.scan.nowIso,\n    calendarId,\n    calendarName:calendar.displayName,\n    calendarKind:calendar.kind,\n    eventIdentityBefore:before?.identity || null,\n    eventIdentityAfter:after?.identity || null,\n    uid:after?.uid || before?.uid || null,\n    title:after?.title || before?.title || '(untitled event)',\n    startUtc:after?.startUtc || before?.startUtc || null,\n    startLocal:(after?.startUtc || before?.startUtc) ? formatLocal(Date.parse(after?.startUtc || before?.startUtc), targetTimezone) : null,\n    meetingUrl:after?.meetingUrl || before?.meetingUrl || null,\n    meetingType:after?.meetingType || before?.meetingType || null,\n    changedFields,\n    before:before || null,\n    after:after || null,\n  };\n  const fingerprintPayload = stableStringify({\n    messageType, reason, calendarId,\n    before:before || null, after:after || null, changedFields,\n  });\n  const messageId = dualHash(fingerprintPayload);\n  const key = `calendar-notifier:message:v1:${calendarId}:${messageId}`;\n  const payload = { ...core, messageId, redisKey:key };\n  return { key, value:JSON.stringify(payload), ttlSeconds:changeMessageTtlSeconds, category:'change_message', messageType };\n};\n\nconst previousCalendars = previousState?.calendars && typeof previousState.calendars === 'object' ? previousState.calendars : {};\nconst nextCalendarStates = {};\nconst currentKeyValues = new Map();\nconst deleteKeys = new Set();\nconst changeMessageWrites = [];\nconst scanErrors = [];\nconst scanWarnings = [];\nconst sourceCalendarIds = new Set();\nconst calendarRefs = [];\nlet totalEvents = 0;\nlet totalReminders = 0;\nlet changedMessageCount = 0;\nlet deletedMessageCount = 0;\n\nfor (const calendar of sourceCache.calendars) {\n  if (calendar.supportsVEvent === false) continue;\n  const identity = `${calendar.kind}|${calendar.caldavUrl || ''}|${calendar.icsUrl || ''}`;\n  const calendarId = fnv1a(identity);\n  sourceCalendarIds.add(calendarId);\n  calendarRefs.push({ calendarId, displayName:calendar.displayName, kind:calendar.kind });\n  const previousCalendar = previousCalendars[calendarId] || null;\n  try {\n    const ics = await fetchCalendarIcs(calendar);\n    const parsed = parseCalendar(ics, calendar);\n    const cancelledExactIdentities = new Set();\n    const cancelledMasterUids = new Set();\n    for (const rawEvent of parsed) {\n      if (rawEvent.status !== 'CANCELLED') continue;\n      if (rawEvent.recurrenceId?.ms !== undefined && rawEvent.recurrenceId?.ms !== null) {\n        cancelledExactIdentities.add(`${rawEvent.uid}|r:${rawEvent.recurrenceId.ms}`);\n      } else {\n        cancelledMasterUids.add(rawEvent.uid);\n      }\n    }\n    const warnings = [];\n    // Materialize the bounded two-local-day horizon (today + tomorrow) for comparison.\n    // Only future-starting occurrences below are written into reminder/event scheduling keys.\n    const occurrences = materializeOccurrences(parsed, calendar, warnings);\n    for (const warning of warnings) scanWarnings.push(`${calendar.displayName}: ${warning}`);\n\n    const normalized = occurrences.map((occ) => ({ occ, event:normalizedEventForOccurrence(occ, calendar, calendarId) }));\n    const currentSnapshots = {};\n    for (const { event } of normalized) currentSnapshots[event.changeIdentity] = comparisonSnapshot(event);\n\n    // Change/deletion detection is enabled only after this calendar has a snapshot\n    // baseline. This avoids emitting a burst of false \"created/changed\" messages\n    // the first time v2 runs against a v1 scan-state record.\n    const previousSnapshots = previousCalendar?.eventSnapshots && typeof previousCalendar.eventSnapshots === 'object'\n      ? previousCalendar.eventSnapshots : null;\n    if (previousSnapshots) {\n      const unmatchedPrevious = new Set(Object.keys(previousSnapshots));\n      const unmatchedCurrent = new Set(Object.keys(currentSnapshots));\n\n      const emitChanged = (before, after) => {\n        const changedFields = diffSnapshots(before, after);\n        if (!changedFields.length || !transitionRelevantNow(before, after)) return;\n        changeMessageWrites.push(buildChangeMessageWrite('event_changed', 'event_fields_changed', calendar, calendarId, before, after, changedFields));\n        changedMessageCount++;\n      };\n\n      // Exact occurrence identities first.\n      for (const id of [...unmatchedPrevious]) {\n        if (!unmatchedCurrent.has(id)) continue;\n        emitChanged(previousSnapshots[id], currentSnapshots[id]);\n        unmatchedPrevious.delete(id);\n        unmatchedCurrent.delete(id);\n      }\n\n      // If a provider changes the recurrence/start identity itself, pair an\n      // otherwise-unmatched previous/current occurrence when that UID is\n      // unambiguous for this local day. This turns common reschedules into a\n      // change notification instead of a deletion.\n      const previousByUid = new Map();\n      const currentByUid = new Map();\n      for (const id of unmatchedPrevious) {\n        const uid = previousSnapshots[id]?.uid || '';\n        if (!previousByUid.has(uid)) previousByUid.set(uid, []);\n        previousByUid.get(uid).push(id);\n      }\n      for (const id of unmatchedCurrent) {\n        const uid = currentSnapshots[id]?.uid || '';\n        if (!currentByUid.has(uid)) currentByUid.set(uid, []);\n        currentByUid.get(uid).push(id);\n      }\n      for (const [uid, prevIds] of previousByUid) {\n        const currIds = currentByUid.get(uid) || [];\n        if (!uid || prevIds.length !== 1 || currIds.length !== 1) continue;\n        const prevId = prevIds[0], currId = currIds[0];\n        emitChanged(previousSnapshots[prevId], currentSnapshots[currId]);\n        unmatchedPrevious.delete(prevId);\n        unmatchedCurrent.delete(currId);\n      }\n\n      // A missing occurrence is considered deleted/cancelled only after a\n      // successful authoritative fetch and only if it had not naturally aged\n      // out of the upcoming window. Fetch failures never enter this branch.\n      for (const id of unmatchedPrevious) {\n        const before = previousSnapshots[id];\n        const previousStartMs = Date.parse(before?.startUtc || '');\n        if (!Number.isFinite(previousStartMs) || previousStartMs <= nowMs - graceMs) continue;\n        const deleteReason = cancelledExactIdentities.has(id) || cancelledMasterUids.has(before?.uid)\n          ? 'cancelled' : 'missing_after_successful_scan';\n        changeMessageWrites.push(buildChangeMessageWrite('event_deleted', deleteReason, calendar, calendarId, before, null, []));\n        deletedMessageCount++;\n      }\n    }\n\n    const owned = {};\n    const eventSummaries = [];\n    const buckets = new Map();\n    for (const { occ, event } of normalized) {\n      if (occ.startMs <= nowMs) continue;\n      const eventValue = JSON.stringify(event);\n      const eventHash = fnv1a(eventValue);\n      currentKeyValues.set(event.eventKey, { value:eventValue, hash:eventHash, ttlSeconds, category:'event', calendarId });\n      owned[event.eventKey] = eventHash;\n      eventSummaries.push(event);\n      totalEvents++;\n\n      for (const offset of offsets) {\n        const triggerMs = occ.startMs - offset * 60000;\n        if (triggerMs < nowMs - graceMs) continue;\n        const minuteMs = Math.ceil(triggerMs / 60000) * 60000;\n        const minuteStamp = new Date(minuteMs).toISOString().replace(/[-:]/g,'').replace(/\\.000Z$/,'Z');\n        const bucketKey = `calendar-notifier:reminders:v1:${offset}:${minuteStamp}:${calendarId}`;\n        if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);\n        buckets.get(bucketKey).push({\n          eventKey:event.eventKey,\n          eventRevision:eventHash,\n          offsetMinutes:offset,\n          scheduledForUtc:new Date(triggerMs).toISOString(),\n          scheduledMinuteUtc:new Date(minuteMs).toISOString(),\n          startUtc:event.startUtc,\n          startLocal:event.startLocal,\n          title:event.title,\n          calendarName:event.calendarName,\n          allDay:event.allDay,\n          meetingUrl:event.meetingUrl,\n          meetingType:event.meetingType,\n        });\n        totalReminders++;\n      }\n    }\n\n    for (const [bucketKey, entries] of buckets) {\n      entries.sort((a,b)=>a.startUtc.localeCompare(b.startUtc) || a.eventKey.localeCompare(b.eventKey));\n      const value = JSON.stringify({ schemaVersion:1, calendarId, entries });\n      const hash = fnv1a(value);\n      currentKeyValues.set(bucketKey, { value, hash, ttlSeconds, category:'reminder_bucket', calendarId });\n      owned[bucketKey] = hash;\n    }\n\n    // Keep one Redis day snapshot per calendar for today and tomorrow. The sender\n    // consumes tomorrow's snapshots at 21:00 local time for the nightly digest.\n    for (const snapshotDate of [cfg.scan.localDate, tomorrowDate]) {\n      const dayEvents = eventSummaries.filter((event) => dateKeyInZone(Date.parse(event.startUtc), targetTimezone) === snapshotDate);\n      const snapshotKey = `calendar-notifier:events:day:v1:${snapshotDate}:${calendarId}`;\n      const snapshotValue = JSON.stringify({\n        schemaVersion:1,\n        date:snapshotDate,\n        timezone:targetTimezone,\n        calendarId,\n        calendarName:calendar.displayName,\n        calendarKind:calendar.kind,\n        events:dayEvents,\n      });\n      const snapshotHash = fnv1a(snapshotValue);\n      currentKeyValues.set(snapshotKey, { value:snapshotValue, hash:snapshotHash, ttlSeconds, category:'calendar_day_snapshot', calendarId });\n      owned[snapshotKey] = snapshotHash;\n    }\n\n    const previousOwned = previousCalendar?.keyHashes || {};\n    for (const key of Object.keys(previousOwned)) if (!(key in owned)) deleteKeys.add(key);\n\n    nextCalendarStates[calendarId] = {\n      calendarId,\n      displayName:calendar.displayName,\n      kind:calendar.kind,\n      sourceFingerprint:fnv1a(identity),\n      status:'ok',\n      lastSuccessfulScanAt:cfg.scan.nowIso,\n      eventCount:eventSummaries.length,\n      dayOccurrenceCount:Object.keys(currentSnapshots).length,\n      reminderCount:[...buckets.values()].reduce((n,a)=>n+a.length,0),\n      keyHashes:owned,\n      eventSnapshots:currentSnapshots,\n      error:null,\n    };\n  } catch (error) {\n    const message = error?.message || String(error);\n    scanErrors.push({ calendarId, calendarName:calendar.displayName, message });\n    if (previousCalendar?.keyHashes) {\n      nextCalendarStates[calendarId] = {\n        ...previousCalendar,\n        calendarId,\n        displayName:calendar.displayName,\n        kind:calendar.kind,\n        status:'stale_preserved',\n        lastErrorAt:cfg.scan.nowIso,\n        error:message,\n      };\n    } else {\n      nextCalendarStates[calendarId] = {\n        calendarId,\n        displayName:calendar.displayName,\n        kind:calendar.kind,\n        sourceFingerprint:fnv1a(identity),\n        status:'error_no_previous_state',\n        lastSuccessfulScanAt:null,\n        eventCount:0,\n        dayOccurrenceCount:0,\n        reminderCount:0,\n        keyHashes:{},\n        eventSnapshots:{},\n        lastErrorAt:cfg.scan.nowIso,\n        error:message,\n      };\n    }\n  }\n}\n\n// Calendars removed from discovery are authoritative deletions.\nfor (const [calendarId, previousCalendar] of Object.entries(previousCalendars)) {\n  if (!sourceCalendarIds.has(calendarId)) {\n    for (const key of Object.keys(previousCalendar?.keyHashes || {})) deleteKeys.add(key);\n  }\n}\n\n// Only write successful-calendar values that are new or changed.\nconst writes = [];\nfor (const [key, record] of currentKeyValues) {\n  const prevHash = previousCalendars[record.calendarId]?.keyHashes?.[key];\n  if (prevHash !== record.hash) writes.push({ key, value:record.value, ttlSeconds:record.ttlSeconds, category:record.category });\n}\n// Change-message keys are deliberately not owned by a calendar snapshot. They\n// persist independently until the future sender consumes them or their TTL expires.\n// Their transition-derived keys make retrying the same scan idempotent.\nwrites.push(...changeMessageWrites);\n\nconst stateValue = {\n  schemaVersion:2,\n  localDate:cfg.scan.localDate,\n  timezone:targetTimezone,\n  scannedAt:cfg.scan.nowIso,\n  scanStartUtc:cfg.scan.startOfTodayIso,\n  scanEndUtc:cfg.scan.endOfHorizonIso,\n  sourceCacheGeneratedAt:sourceCache.generatedAt || null,\n  reminderOffsetsMinutes:offsets,\n  reminderGraceSeconds:cfg.reminderGraceSeconds,\n  calendars:nextCalendarStates,\n  errors:scanErrors,\n  warnings:scanWarnings.slice(0,100),\n};\nconst stateWrite = { key:cfg.scan.stateKey, value:JSON.stringify(stateValue), ttlSeconds, category:'scan_state' };\nconst changeMessages = changeMessageWrites.map((write) => {\n  try { return JSON.parse(write.value); } catch { return null; }\n}).filter(Boolean);\n\nreturn [{ json: {\n  status: scanErrors.length ? 'partial_error' : 'ok',\n  scannedAt:cfg.scan.nowIso,\n  localDate:cfg.scan.localDate,\n  timezone:targetTimezone,\n  calendarCount:sourceCalendarIds.size,\n  successfulCalendarCount:Object.values(nextCalendarStates).filter((c)=>c.status==='ok').length,\n  stalePreservedCalendarCount:Object.values(nextCalendarStates).filter((c)=>c.status==='stale_preserved').length,\n  errorCalendarCount:Object.values(nextCalendarStates).filter((c)=>c.status==='error_no_previous_state').length,\n  upcomingEventCount:totalEvents,\n  reminderEntryCount:totalReminders,\n  changedWriteCount:writes.length,\n  changeMessageCount:changedMessageCount + deletedMessageCount,\n  eventChangedMessageCount:changedMessageCount,\n  eventDeletedMessageCount:deletedMessageCount,\n  deleteCount:deleteKeys.size,\n  errors:scanErrors,\n  warnings:scanWarnings.slice(0,100),\n  calendarRefs,\n  tomorrowDate,\n  changeMessages,\n  redisPlan:{ deletes:[...deleteKeys], writes, stateWrite },\n} }];"
+      },
+      "id": "998da153-be3e-49e5-a5ed-9ea5f4b8eb3a",
+      "name": "Scan Upcoming Events & Build Redis Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5248,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const plan = $('Scan Upcoming Events & Build Redis Plan').first().json.redisPlan;\nconst keys = Array.isArray(plan?.deletes) ? plan.deletes : [];\nif (!keys.length) {\n  // Deleting a guaranteed workflow-owned nonexistent key is a safe no-op and keeps\n  // the sequential delete -> write chain alive.\n  return [{ json:{ key:'calendar-notifier:no-op-delete:v1', noOp:true } }];\n}\nreturn keys.map((key) => ({ json:{ key, noOp:false } }));"
+      },
+      "id": "48509af9-f788-4ceb-ac7a-6cc4c3edeb85",
+      "name": "Prepare Stale Key Deletes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5536,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "={{ $json.key }}"
+      },
+      "id": "6c515832-c284-4972-89b9-98104193b503",
+      "name": "Delete Stale Redis Keys",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        5792,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const plan = $('Scan Upcoming Events & Build Redis Plan').first().json.redisPlan;\nconst writes = Array.isArray(plan?.writes) ? plan.writes : [];\nif (!writes.length) {\n  return [{ json:{\n    key:'calendar-notifier:no-op-write:v1',\n    value:JSON.stringify({ noOp:true, at:new Date().toISOString() }),\n    ttlSeconds:60,\n    category:'no_op',\n    noOp:true,\n  } }];\n}\nreturn writes.map((w) => ({ json:{ key:w.key, value:w.value, ttlSeconds:w.ttlSeconds, category:w.category, noOp:false } }));"
+      },
+      "id": "c49e937a-5f13-4d78-9cf6-4df2187470f4",
+      "name": "Prepare Changed Redis Writes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6048,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.key }}",
+        "value": "={{ $json.value }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "6d2b5d8b-6723-4057-9c51-7d520605c282",
+      "name": "Write Event & Reminder State",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        6336,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Frequency / scan window\nDefault schedule is every minute. Change the cron expression on **Schedule - Every Minute** if desired. The scanner fetches a bounded two-local-day horizon (today + tomorrow in `TIMEZONE`). Reminder/event keys are only materialized for future starts. The extra day supports the 21:00 next-day digest and reminders for meetings shortly after midnight.",
+        "height": 310,
+        "width": 500,
+        "color": 4
+      },
+      "id": "6b82ec74-5d66-4acf-8168-a609c16efbee",
+      "name": "Frequency / Scan Window Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3968,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Redis scheduling contract\nReminder buckets: `calendar-notifier:reminders:v1:<offset>:<UTC-minute>:<calendarId>`\nDay snapshots: `calendar-notifier:events:day:v1:<YYYY-MM-DD>:<calendarId>`\nReminder sent markers: `calendar-notifier:sent:v1:reminder:<offset>:<UTC-minute>:<eventKey>`\nChange sent markers: `calendar-notifier:sent:v1:change:<messageId>`\nDigest sent marker: `calendar-notifier:sent:v1:digest:<YYYY-MM-DD>`\n\nReminder sent markers prevent duplicate delivery when the every-minute workflow retries or overlaps.",
+        "height": 330,
+        "width": 500,
+        "color": 6
+      },
+      "id": "19dd088d-0a68-4809-a17c-bb0722977b42",
+      "name": "Redis Scheduling Contract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5520,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Failure safety\nThe calendar source registry `calendar-notifier:calendar-sources:v1` is persistent and is refreshed by the discovery workflow.\n\nIf the source registry is missing entirely (for example after a Redis flush or before discovery has run once), this workflow returns `skipped_source_registry_missing`, writes only a 5-minute health key, and performs **no deletes and no change/deletion detection**. Run/activate the discovery workflow to repopulate the registry.\n\nIf a calendar is still present in the discovery registry but its CalDAV/ICS fetch fails, the workflow marks it `stale_preserved` and keeps that calendar's previous Redis keys/snapshots untouched. **No deletion/change message is generated from a failed fetch.**\n\nA successful fetch is authoritative. Missing future occurrences can generate `event_deleted`; changed title/time/location/meeting-link fields can generate `event_changed`. Naturally elapsed events do not generate deletion messages.\n\nThe first v2+ scan over an older v1 state establishes the comparison baseline without emitting change messages.",
+        "height": 300,
+        "width": 500,
+        "color": 5
+      },
+      "id": "c77ac53f-bcf5-412f-b48b-6a5f2b4287d0",
+      "name": "Failure Safety Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6048,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst scan = $('Scan Upcoming Events & Build Redis Plan').first().json;\nconst lookups = [];\nconst seen = new Set();\nconst add = (item) => {\n  if (!item?.lookupKey) return;\n  const key = `${item.lookupType}|${item.lookupKey}`;\n  if (seen.has(key)) return;\n  seen.add(key);\n  lookups.push(item);\n};\n\n// Read the current and recent due-minute reminder buckets from Redis. Using a\n// short lookback makes the sender tolerant of a delayed one-minute execution.\nconst nowMinuteMs = Math.floor(Number(cfg.scan.nowMs) / 60000) * 60000;\nfor (const cal of (scan.calendarRefs || [])) {\n  for (const offset of cfg.reminderOffsetsMinutes || []) {\n    for (let back = 0; back < Number(cfg.reminderLookupMinutes || 5); back++) {\n      const minuteMs = nowMinuteMs - back * 60000;\n      const stamp = new Date(minuteMs).toISOString().replace(/[-:]/g,'').replace(/\\.000Z$/,'Z');\n      add({\n        lookupType:'reminder_bucket',\n        lookupKey:`calendar-notifier:reminders:v1:${offset}:${stamp}:${cal.calendarId}`,\n        calendarId:cal.calendarId,\n        calendarName:cal.displayName,\n        offsetMinutes:Number(offset),\n        minuteMs,\n      });\n    }\n  }\n}\n\n// Change/deletion messages are transition-derived. Check their sent marker\n// before publishing so retries of the scan are idempotent.\nfor (const message of (scan.changeMessages || [])) {\n  add({\n    lookupType:'change_sent_marker',\n    lookupKey:`calendar-notifier:sent:v1:change:${message.messageId}`,\n    message,\n  });\n}\n\n// At/after 21:00 local, read tomorrow's cached per-calendar snapshots and the\n// per-target-day digest marker. The marker makes the digest exactly-once per day.\nif (cfg.digest?.dueNow) {\n  add({ lookupType:'digest_sent_marker', lookupKey:cfg.digest.markerKey, targetDate:cfg.digest.targetDate });\n  for (const cal of (scan.calendarRefs || [])) {\n    add({\n      lookupType:'tomorrow_snapshot',\n      lookupKey:`calendar-notifier:events:day:v1:${cfg.digest.targetDate}:${cal.calendarId}`,\n      targetDate:cfg.digest.targetDate,\n      calendarId:cal.calendarId,\n      calendarName:cal.displayName,\n    });\n  }\n}\n\nif (!lookups.length) {\n  lookups.push({ lookupType:'no_op', lookupKey:'calendar-notifier:no-op-read:v1' });\n}\nreturn lookups.map((json) => ({ json }));"
+      },
+      "id": "9d32ef83-4e35-4062-81a9-352f76f88b26",
+      "name": "Prepare Delivery Cache Reads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6608,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "cacheValue",
+        "key": "={{ $json.lookupKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "60336b25-de3f-4eab-8483-695d7565975e",
+      "name": "Read Delivery Cache",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        6880,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst scan = $('Scan Upcoming Events & Build Redis Plan').first().json;\nconst requests = $('Prepare Delivery Cache Reads').all();\nconst results = $input.all();\nconst parsed = [];\nconst parseMaybe = (raw) => {\n  if (raw === null || raw === undefined || raw === '') return null;\n  if (typeof raw === 'object') return raw;\n  try { return JSON.parse(String(raw)); } catch { return null; }\n};\nfor (let i = 0; i < requests.length; i++) {\n  parsed.push({ ...requests[i].json, cacheValue:results[i]?.json?.cacheValue ?? null });\n}\n\nconst reminderEntries = [];\nconst nonReminderCandidates = [];\nconst nowMs = Number(cfg.scan.nowMs);\nconst maxReminderAgeMs = Math.max(2, Number(cfg.reminderLookupMinutes || 5)) * 60000 + 30000;\n\nfor (const row of parsed.filter((r) => r.lookupType === 'reminder_bucket')) {\n  const bucket = parseMaybe(row.cacheValue);\n  if (!bucket || !Array.isArray(bucket.entries)) continue;\n  for (const entry of bucket.entries) {\n    const scheduledForMs = Date.parse(entry.scheduledForUtc || '');\n    if (!Number.isFinite(scheduledForMs)) continue;\n    if (scheduledForMs > nowMs) continue;\n    if (nowMs - scheduledForMs > maxReminderAgeMs) continue;\n    const scheduledMinute = String(entry.scheduledMinuteUtc || '').replace(/[-:]/g,'').replace(/\\.000Z$/,'Z');\n    const sentKey = `calendar-notifier:sent:v1:reminder:${entry.offsetMinutes}:${scheduledMinute}:${entry.eventKey}`;\n    reminderEntries.push({\n      ...entry,\n      calendarId:bucket.calendarId || row.calendarId,\n      calendarName:entry.calendarName || row.calendarName || '',\n      sentKey,\n    });\n  }\n}\n\nconst fmtTime = (iso) => {\n  const ms = Date.parse(iso || '');\n  if (!Number.isFinite(ms)) return iso || '';\n  return new Intl.DateTimeFormat('en-US', {\n    timeZone:cfg.timezone,\n    weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit',\n  }).format(new Date(ms));\n};\n\nconst changedFieldLabels = {\n  title:'title', start_time:'start time', end_time:'end time', location:'location',\n  meeting_link:'meeting link', meeting_type:'meeting type', all_day:'all-day status',\n};\nfor (const row of parsed.filter((r) => r.lookupType === 'change_sent_marker')) {\n  if (row.cacheValue !== null && row.cacheValue !== undefined && row.cacheValue !== '') continue;\n  const m = row.message || {};\n  const deleted = m.messageType === 'event_deleted';\n  const cancelled = deleted && m.reason === 'cancelled';\n  const title = deleted\n    ? `${cancelled ? 'Meeting cancelled' : 'Meeting deleted'}: ${m.title || '(untitled event)'}`\n    : `Meeting changed: ${m.title || '(untitled event)'}`;\n  const lines = [];\n  if (m.calendarName) lines.push(`Calendar: ${m.calendarName}`);\n  if (m.startUtc) lines.push(`Time: ${fmtTime(m.startUtc)}`);\n  if (!deleted && Array.isArray(m.changedFields) && m.changedFields.length) {\n    lines.push(`Changed: ${m.changedFields.map((f) => changedFieldLabels[f] || f).join(', ')}`);\n  }\n  if (m.meetingUrl) lines.push(`Join: ${m.meetingUrl}`);\n  nonReminderCandidates.push({\n    notificationType:m.messageType || 'event_changed',\n    id:m.messageId,\n    title,\n    message:lines.join('\\n') || title,\n    click:m.meetingUrl || null,\n    tags:deleted ? ['calendar','warning'] : ['calendar','arrows_counterclockwise'],\n    priority:deleted ? 4 : 3,\n    sentKey:row.lookupKey,\n    sentTtlSeconds:Number(cfg.sentMarkerTtlSeconds),\n    blockStateOnFailure:true,\n  });\n}\n\nif (cfg.digest?.dueNow) {\n  const digestMarker = parsed.find((r) => r.lookupType === 'digest_sent_marker');\n  const digestAlreadySent = digestMarker && digestMarker.cacheValue !== null && digestMarker.cacheValue !== undefined && digestMarker.cacheValue !== '';\n  if (!digestAlreadySent) {\n    const events = [];\n    const missingCalendars = [];\n    for (const row of parsed.filter((r) => r.lookupType === 'tomorrow_snapshot')) {\n      const snapshot = parseMaybe(row.cacheValue);\n      if (!snapshot || !Array.isArray(snapshot.events)) {\n        missingCalendars.push(row.calendarName || row.calendarId);\n        continue;\n      }\n      for (const event of snapshot.events) events.push(event);\n    }\n    events.sort((a,b) => String(a.startUtc || '').localeCompare(String(b.startUtc || '')) || String(a.title || '').localeCompare(String(b.title || '')));\n    const lines = [];\n    if (!events.length) {\n      lines.push('No meetings scheduled.');\n    } else {\n      for (const event of events) {\n        const time = event.allDay ? 'All day' : new Intl.DateTimeFormat('en-US', {\n          timeZone:cfg.timezone, hour:'numeric', minute:'2-digit'\n        }).format(new Date(Date.parse(event.startUtc)));\n        lines.push(`${time} — ${event.title || '(untitled event)'}${event.calendarName ? ` [${event.calendarName}]` : ''}`);\n        if (event.meetingUrl) lines.push(`  ${event.meetingUrl}`);\n      }\n    }\n    if (missingCalendars.length) {\n      lines.push('', `Warning: no cached snapshot was available for: ${missingCalendars.join(', ')}`);\n    }\n    nonReminderCandidates.push({\n      notificationType:'daily_digest',\n      id:`digest:${cfg.digest.targetDate}`,\n      title:`Tomorrow's meetings — ${cfg.digest.targetDate}`,\n      message:lines.join('\\n'),\n      click:null,\n      tags:['calendar'],\n      priority:3,\n      sentKey:cfg.digest.markerKey,\n      sentTtlSeconds:Number(cfg.sentMarkerTtlSeconds),\n      blockStateOnFailure:false,\n    });\n  }\n}\n\n// First item carries non-reminder candidates through the reminder-marker GET.\n// Every reminder gets its own marker lookup item.\nconst out = [{ json:{\n  lookupType:'delivery_meta',\n  lookupKey:'calendar-notifier:no-op-read:v1',\n  nonReminderCandidates,\n} }];\nfor (const reminder of reminderEntries) {\n  out.push({ json:{ lookupType:'reminder_sent_marker', lookupKey:reminder.sentKey, reminder } });\n}\nreturn out;"
+      },
+      "id": "c6d58748-469b-4a70-8d4c-217f21930bb8",
+      "name": "Build Delivery Candidates & Reminder Marker Reads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7152,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "cacheValue",
+        "key": "={{ $json.lookupKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "e1415a20-5a30-48dc-b643-94ea1d2ca8db",
+      "name": "Read Reminder Sent Markers",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        7408,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst requests = $('Build Delivery Candidates & Reminder Marker Reads').all();\nconst results = $input.all();\nconst meta = requests.find((r) => r.json.lookupType === 'delivery_meta')?.json || {};\nconst candidates = Array.isArray(meta.nonReminderCandidates) ? [...meta.nonReminderCandidates] : [];\n\nconst fmtStart = (iso, allDay) => {\n  const ms = Date.parse(iso || '');\n  if (!Number.isFinite(ms)) return '';\n  if (allDay) return 'All day';\n  return new Intl.DateTimeFormat('en-US', {\n    timeZone:cfg.timezone, weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'\n  }).format(new Date(ms));\n};\n\nfor (let i = 0; i < requests.length; i++) {\n  const req = requests[i]?.json || {};\n  if (req.lookupType !== 'reminder_sent_marker') continue;\n  const raw = results[i]?.json?.cacheValue;\n  if (raw !== null && raw !== undefined && raw !== '') continue;\n  const r = req.reminder || {};\n  const offset = Number(r.offsetMinutes || 0);\n  const when = fmtStart(r.startUtc, r.allDay);\n  const title = `${r.title || '(untitled event)'} — in ${offset} minute${offset === 1 ? '' : 's'}`;\n  const lines = [];\n  if (when) lines.push(`Time: ${when}`);\n  if (r.calendarName) lines.push(`Calendar: ${r.calendarName}`);\n  if (r.meetingUrl) lines.push(`Join: ${r.meetingUrl}`);\n  candidates.push({\n    notificationType:'meeting_reminder',\n    id:`${r.eventKey}:${offset}:${r.scheduledMinuteUtc}`,\n    title,\n    message:lines.join('\\n') || title,\n    click:r.meetingUrl || null,\n    tags:['calendar','alarm_clock'],\n    priority:4,\n    sentKey:req.lookupKey,\n    sentTtlSeconds:Number(cfg.sentMarkerTtlSeconds),\n    blockStateOnFailure:false,\n  });\n}\n\nif (!candidates.length) {\n  return [{ json:{ noOp:true, notificationType:'none' } }];\n}\nreturn candidates.map((json) => ({ json }));"
+      },
+      "id": "95dba9f6-3f46-4db1-bb14-10478e9d058e",
+      "name": "Build Notification Batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7680,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ntfy delivery + idempotency\nThe scanner also acts as the sender. It reads due reminder-minute buckets, checks permanent sent markers, then acquires a short **atomic Redis INCR claim** before publishing. This prevents overlapping executions from both sending the same notification. Successful sends get a 14-day sent marker; failed sends release their claim for retry. Claims expire after 120 seconds as a crash-recovery safety net.\n\nAt/after 21:00 in `TIMEZONE`, tomorrow's per-calendar day snapshots are combined into one digest and guarded by `calendar-notifier:sent:v1:digest:<YYYY-MM-DD>`. Meeting URLs are included in the body and as ntfy `click` targets when present.",
+        "height": 300,
+        "width": 720
+      },
+      "id": "0c3cc345-47ff-489c-80fc-93985fd4cc2a",
+      "name": "ntfy Delivery Contract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        7648,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const candidates = $input.all().map((i) => i.json || {});\nif (candidates.length === 1 && candidates[0].noOp) {\n  return [{ json:{ noOp:true, claimKey:'calendar-notifier:claim:v1:no-op', candidate:candidates[0] } }];\n}\nreturn candidates.filter((c) => !c.noOp).map((candidate) => ({ json:{\n  noOp:false,\n  claimKey:String(candidate.sentKey || '').replace(/^calendar-notifier:sent:v1:/, 'calendar-notifier:claim:v1:'),\n  candidate,\n} }));"
+      },
+      "id": "7ad17635-6f01-417c-84c6-8717f1bdbd6f",
+      "name": "Prepare Atomic Delivery Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7952,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "incr",
+        "key": "={{ $json.claimKey }}",
+        "expire": true,
+        "ttl": 120
+      },
+      "id": "e178ef85-e3d9-418d-a990-0a678d330acc",
+      "name": "Claim Notifications Atomically",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        8224,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const requests = $('Prepare Atomic Delivery Claims').all();\nconst results = $input.all();\nconst out = [];\nfor (let i = 0; i < requests.length; i++) {\n  const req = requests[i]?.json || {};\n  if (req.noOp) {\n    out.push({ json:{ noOp:true, notificationType:'none', shouldSend:false } });\n    continue;\n  }\n  const claimKey = req.claimKey;\n  const raw = results[i]?.json?.[claimKey];\n  const claimCount = Number(raw);\n  const candidate = req.candidate || {};\n  if (claimCount === 1) {\n    out.push({ json:{ ...candidate, claimKey, claimCount, shouldSend:true, claimLost:false } });\n  } else {\n    out.push({ json:{\n      ...candidate,\n      claimKey,\n      claimCount:Number.isFinite(claimCount) ? claimCount : null,\n      shouldSend:false,\n      claimLost:true,\n      success:false,\n      deliveryStatus:'claimed_elsewhere',\n      error:'Another workflow execution already holds the atomic Redis delivery claim',\n    } });\n  }\n}\nreturn out;"
+      },
+      "id": "198665ed-0f8a-49c2-b7c0-ac6b98e9f004",
+      "name": "Filter Atomic Delivery Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8496,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst input = $input.all().map((i) => i.json || {});\nif (input.length === 1 && input[0].noOp) return [{ json:{ noOp:true, success:true, notificationType:'none', deliveryStatus:'no_op' } }];\n\nconst endpoint = String(cfg.notifications.baseUrl || '').replace(/\\/+$/, '');\nif (!/^https?:\\/\\/[^\\s/]+(?:\\/.*)?$/i.test(endpoint)) throw new Error(`NOTIFICATIONS_BASE_URL is not a valid HTTP(S) endpoint: ${endpoint}`);\nconst auth = Buffer.from(`${cfg.notifications.user}:${cfg.notifications.password}`, 'utf8').toString('base64');\nconst out = [];\nfor (const candidate of input) {\n  if (candidate.noOp) { out.push({ json:candidate }); continue; }\n  if (!candidate.shouldSend) {\n    out.push({ json:{ ...candidate, success:false, attempted:false, deliveryStatus:candidate.deliveryStatus || 'not_claimed' } });\n    continue;\n  }\n  try {\n    const headers = {\n      Authorization:`Basic ${auth}`,\n      'Content-Type':'application/json; charset=utf-8',\n    };\n    const publishBody = {\n      topic:String(cfg.notifications.topic || ''),\n      title:String(candidate.title || 'Calendar'),\n      message:String(candidate.message || ''),\n      priority:Number(candidate.priority || 3),\n      tags:Array.isArray(candidate.tags) ? candidate.tags : ['calendar'],\n    };\n    if (candidate.click) publishBody.click = String(candidate.click);\n    const res = await this.helpers.httpRequest({\n      method:'POST',\n      url:endpoint,\n      headers,\n      body:JSON.stringify(publishBody),\n      encoding:'text',\n      timeout:20000,\n      returnFullResponse:true,\n      ignoreHttpStatusErrors:true,\n    });\n    const statusCode = Number(res?.statusCode || 0);\n    const success = statusCode >= 200 && statusCode < 300;\n    out.push({ json:{ ...candidate, success, attempted:true, deliveryStatus:success ? 'sent' : 'http_error', statusCode, error:success ? null : `ntfy returned HTTP ${statusCode || 'unknown'}` } });\n  } catch (error) {\n    out.push({ json:{ ...candidate, success:false, attempted:true, deliveryStatus:'request_error', statusCode:null, error:error?.message || String(error) } });\n  }\n}\nreturn out;"
+      },
+      "id": "3c23b4a3-6409-4a46-aa1d-950dc29d8085",
+      "name": "Send ntfy Notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8768,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const deliveries = $('Send ntfy Notifications').all().map((i) => i.json || {});\nconst successes = deliveries.filter((d) => !d.noOp && d.success && d.sentKey);\nif (!successes.length) {\n  return [{ json:{\n    key:'calendar-notifier:no-op-sent-marker:v1',\n    value:JSON.stringify({ noOp:true, at:new Date().toISOString() }),\n    ttlSeconds:60,\n    noOp:true,\n  } }];\n}\nreturn successes.map((d) => ({ json:{\n  key:d.sentKey,\n  value:JSON.stringify({\n    schemaVersion:1,\n    notificationType:d.notificationType,\n    notificationId:d.id || null,\n    sentAt:new Date().toISOString(),\n    statusCode:d.statusCode || null,\n  }),\n  ttlSeconds:Number(d.sentTtlSeconds || 1209600),\n  noOp:false,\n} }));"
+      },
+      "id": "11194a18-df95-4034-934c-b336c1040772",
+      "name": "Prepare Sent Marker Writes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9040,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.key }}",
+        "value": "={{ $json.value }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "23297dc6-c3a4-4cf1-80ad-2c1b96eea314",
+      "name": "Write Sent Markers",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        9312,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const deliveries = $('Send ntfy Notifications').all().map((i) => i.json || {});\n// Only release claims that this execution actually won and then failed to send.\n// Never delete a claim marked claimed_elsewhere because it belongs to another execution.\nconst failed = deliveries.filter((d) => !d.noOp && d.shouldSend && !d.success && d.claimKey);\nif (!failed.length) return [{ json:{ key:'calendar-notifier:no-op-claim-delete:v1', noOp:true } }];\nreturn failed.map((d) => ({ json:{ key:d.claimKey, noOp:false } }));"
+      },
+      "id": "ffe8eac2-5a6a-42ba-8ffd-8cc8dda218e8",
+      "name": "Prepare Failed Claim Deletes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9568,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "={{ $json.key }}"
+      },
+      "id": "c6e52feb-d445-45db-82e7-8a4ffb9de300",
+      "name": "Release Failed Delivery Claims",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        9840,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const scan = $('Scan Upcoming Events & Build Redis Plan').first().json;\nconst deliveries = $('Send ntfy Notifications').all().map((i) => i.json || {}).filter((d) => !d.noOp);\n// Change/deletion transitions are tied to the authoritative scan state. If this\n// execution did not confirm delivery (including losing an atomic claim to an\n// overlapping execution), do not advance state. The winner can advance it; if\n// the winner crashes, the short claim TTL expires and a later run retries.\nconst blockingFailures = deliveries.filter((d) => d.blockStateOnFailure && !d.success);\nif (blockingFailures.length) {\n  const summary = blockingFailures.map((d) => `${d.notificationType}:${d.id || 'unknown'} (${d.error || d.deliveryStatus || 'send not confirmed'})`).join('; ');\n  throw new Error(`ntfy change/deletion delivery was not confirmed; scan state was NOT advanced so the transition can retry: ${summary}`);\n}\nconst stateWrite = scan.redisPlan?.stateWrite || null;\nif (!stateWrite) {\n  return [{ json:{\n    key:'calendar-notifier:no-op-scan-state:v1',\n    value:JSON.stringify({ noOp:true, at:new Date().toISOString() }),\n    ttlSeconds:60,\n    noOp:true,\n  } }];\n}\nreturn [{ json:{ ...stateWrite, noOp:false } }];"
+      },
+      "id": "a754953e-b4a3-4663-abb3-4555771899cd",
+      "name": "Delivery Gate & Prepare Scan State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10112,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.key }}",
+        "value": "={{ $json.value }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "8e2255f9-c0f2-49a7-ae2b-43b31e5bc6c2",
+      "name": "Write Scan State",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        10384,
+        1088
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const scan = $('Scan Upcoming Events & Build Redis Plan').first().json;\nconst deliveries = $('Send ntfy Notifications').all().map((i) => i.json || {}).filter((d) => !d.noOp);\nconst successful = deliveries.filter((d) => d.success);\nconst failed = deliveries.filter((d) => !d.success && !d.claimLost);\nconst claimedElsewhere = deliveries.filter((d) => d.claimLost);\nconst byType = {};\nfor (const d of successful) byType[d.notificationType] = (byType[d.notificationType] || 0) + 1;\nconst { redisPlan, changeMessages, calendarRefs, ...summary } = scan;\nreturn [{ json:{\n  ...summary,\n  redis:{\n    applied:true,\n    stateApplied:Boolean(redisPlan?.stateWrite),\n    stateKey:redisPlan?.stateWrite?.key || null,\n  },\n  delivery:{\n    candidates:deliveries.length,\n    sent:successful.length,\n    failed:failed.length,\n    claimedElsewhere:claimedElsewhere.length,\n    sentByType:byType,\n    failures:failed.map((d) => ({ notificationType:d.notificationType, id:d.id || null, error:d.error || null, statusCode:d.statusCode || null })),\n  },\n} }];"
+      },
+      "id": "09fa131b-98b2-4bba-9b33-bce72e885b8f",
+      "name": "Scan & Delivery Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10656,
+        1088
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule - Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Get Event Scan Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Get Event Scan Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Event Scan Config": {
+      "main": [
+        [
+          {
+            "node": "Format & Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format & Validate Config": {
+      "main": [
+        [
+          {
+            "node": "Get Calendar Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Calendar Sources": {
+      "main": [
+        [
+          {
+            "node": "Get Previous Scan State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Previous Scan State": {
+      "main": [
+        [
+          {
+            "node": "Scan Upcoming Events & Build Redis Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan Upcoming Events & Build Redis Plan": {
+      "main": [
+        [
+          {
+            "node": "Prepare Stale Key Deletes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Stale Key Deletes": {
+      "main": [
+        [
+          {
+            "node": "Delete Stale Redis Keys",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Stale Redis Keys": {
+      "main": [
+        [
+          {
+            "node": "Prepare Changed Redis Writes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Changed Redis Writes": {
+      "main": [
+        [
+          {
+            "node": "Write Event & Reminder State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Event & Reminder State": {
+      "main": [
+        [
+          {
+            "node": "Prepare Delivery Cache Reads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Delivery Cache Reads": {
+      "main": [
+        [
+          {
+            "node": "Read Delivery Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Delivery Cache": {
+      "main": [
+        [
+          {
+            "node": "Build Delivery Candidates & Reminder Marker Reads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Delivery Candidates & Reminder Marker Reads": {
+      "main": [
+        [
+          {
+            "node": "Read Reminder Sent Markers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Reminder Sent Markers": {
+      "main": [
+        [
+          {
+            "node": "Build Notification Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notification Batch": {
+      "main": [
+        [
+          {
+            "node": "Prepare Atomic Delivery Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Atomic Delivery Claims": {
+      "main": [
+        [
+          {
+            "node": "Claim Notifications Atomically",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Notifications Atomically": {
+      "main": [
+        [
+          {
+            "node": "Filter Atomic Delivery Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Atomic Delivery Claims": {
+      "main": [
+        [
+          {
+            "node": "Send ntfy Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send ntfy Notifications": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sent Marker Writes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sent Marker Writes": {
+      "main": [
+        [
+          {
+            "node": "Write Sent Markers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Sent Markers": {
+      "main": [
+        [
+          {
+            "node": "Prepare Failed Claim Deletes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Failed Claim Deletes": {
+      "main": [
+        [
+          {
+            "node": "Release Failed Delivery Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Failed Delivery Claims": {
+      "main": [
+        [
+          {
+            "node": "Delivery Gate & Prepare Scan State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delivery Gate & Prepare Scan State": {
+      "main": [
+        [
+          {
+            "node": "Write Scan State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Scan State": {
+      "main": [
+        [
+          {
+            "node": "Scan & Delivery Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "3afc25eb-4137-429c-9daf-bbff21dc8300",
+  "meta": {
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "1OdiwZBJYGIIQc0i",
+  "tags": []
+}

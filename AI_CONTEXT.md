@@ -490,3 +490,308 @@ If all Reader HTTP attempts fail, the response uses this top-level shape:
 - Add an optional credentialed Jina path for higher throughput.
 - Consider a more precise Redis Lua or REST implementation if exact TTL reads are needed later. The current behavior is deliberately simple and treats TTL as freshly reset after every increment.
 - Consider a batch wrapper workflow if parent workflows frequently need to fetch many URLs and aggregate the results.
+
+## Calendar notifications - Nextcloud + ntfy
+
+Checkpoint: **2026-09-22**. The workflow exports listed below are the canonical cutoff versions; intermediate `_v1` / `_v2` / `_v3` / `_v4` development artifacts are not repository files.
+
+### Current files
+
+- `workflows/calendar-notifications/README.md`
+- `workflows/calendar-notifications/Calendar Notifications - Discover Nextcloud Calendars.json`
+- `workflows/calendar-notifications/Calendar Notifications - Scan Upcoming Events & Send Notifications.json`
+
+### Current architecture
+
+Calendar notifications use two n8n workflows:
+
+1. **Calendar Notifications - Discover Nextcloud Calendars**
+   - Default schedule: every 15 minutes (`*/15 * * * *`).
+   - Reads all calendar resources for the configured Nextcloud user.
+   - Distinguishes normal Nextcloud CalDAV calendars from externally subscribed ICS calendars.
+   - Writes a persistent last-known-good calendar-source registry to Redis.
+2. **Calendar Notifications - Scan Upcoming Events & Send Notifications**
+   - Default schedule: every minute (`* * * * *`).
+   - Reads the cached calendar-source registry instead of rediscovering calendars every minute.
+   - Fetches a bounded two-local-day event horizon: **today + tomorrow in `TIMEZONE`**.
+   - Reconciles normalized event keys, day snapshots, reminder buckets, changes, and deletions into Redis.
+   - Sends due 30/10/1-minute reminders through ntfy.
+   - Sends `event_changed` and `event_deleted`/cancelled notices through ntfy.
+   - At/after 21:00 in `TIMEZONE`, sends one digest containing all cached meetings for the following local day.
+   - Uses Redis permanent sent markers plus short atomic delivery claims to suppress duplicate delivery across retries and overlapping workflow executions.
+
+The schedule trigger is intentionally the place where users change polling frequency. Do not hide polling frequency inside code.
+
+### Configuration keys
+
+Read service configuration from `public.key_value_store` through the existing `automation-db` PostgreSQL credential. Do not hard-code service secrets in workflow JSON.
+
+Nextcloud/runtime keys:
+
+- `NEXCLOUD_BASE_URL`
+- `NEXCLOUD_CALENDAR_USER`
+- `NEXCLOUD_CALENDAR_PASSWORD`
+- `TIMEZONE`
+
+Current deployment decision: keep `NEXCLOUD_BASE_URL` pointed at the public Nextcloud URL:
+
+```text
+https://cloud.idle.laziness.rocks
+```
+
+This public URL is currently confirmed working from the n8n workflows and should remain the configured value unless the deployment decision changes later. Do not switch it back to a Docker-internal hostname unless intentionally revisiting connectivity/routing.
+
+Redis keys:
+
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_PASSWORD`
+- `REDIS_DATABASE`
+
+The repository already has an n8n Redis credential named `Redis - shared`. Calendar workflows use that credential for Redis operations; keep it aligned with the Redis values stored in `public.key_value_store`.
+
+ntfy keys:
+
+- `NOTIFICATIONS_USER`
+- `NOTIFICATIONS_PASSWORD`
+- `NOTIFICATIONS_BASE_URL`
+- `NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC`
+
+The scanner publishes to `NOTIFICATIONS_BASE_URL` using ntfy's JSON publish body with `NOTIFICATIONS_CALENDAR_CHANNEL_TOPIC` as `topic` and HTTP Basic authentication from the configured notification user/password.
+
+### Calendar discovery contract
+
+Calendar discovery must not assume that `NEXCLOUD_CALENDAR_USER` is identical to the internal Nextcloud UID. Use authenticated DAV `current-user-principal`, then CalDAV `calendar-home-set`, then list the calendar home with `Depth: 1`.
+
+The calendar listing asks for display name, resource type, supported calendar components, read-only state, and the CalendarServer `source` property.
+
+Nextcloud represents calendar subscriptions with:
+
+```text
+{http://calendarserver.org/ns/}source
+```
+
+Use the presence of this property to classify a calendar as an external subscription. Do not infer subscriptions from calendar names.
+
+Normalized cached calendar records use these modes:
+
+- Normal Nextcloud calendar:
+  - `kind: "nextcloud_caldav"`
+  - `caldavUrl`: DAV collection URL used by the event scanner for bounded `REPORT` queries
+  - `icsUrl`: the calendar DAV URL with `?export`, retained as a source/reference URL
+  - `fetchAuth: "nextcloud_basic"`
+- External ICS subscription:
+  - `kind: "subscription_ics"`
+  - `subscriptionSourceUrl`: the original source URL exposed by Nextcloud
+  - `icsUrl`: the same external source URL, with `webcal://` normalized to `http://` and `webcals://` normalized to `https://`
+  - `fetchAuth: "none"`
+
+This split is deliberate: external subscribed calendars such as Google secret ICS subscriptions must be fetched from their original ICS URL rather than relying on Nextcloud's cached subscription representation.
+
+The normalized source list is cached as JSON in Redis:
+
+```text
+calendar-notifier:calendar-sources:v1
+```
+
+Durability: **no Redis TTL**. `calendar-notifier:calendar-sources:v1` is a persistent last-known-good source registry. The discovery workflow refreshes it every 15 minutes by default. A missing registry (for example after a Redis flush or before the first discovery run) is treated as a safe scanner skip: no event/reminder keys are deleted and no change/deletion notices are generated.
+
+### Upcoming-event scan contract
+
+Default scan cadence: every minute.
+
+The scanner now uses this bounded local window:
+
+```text
+comparison/reconciliation: local midnight today -> local midnight after tomorrow
+reminder scheduling:       now -> local midnight after tomorrow
+```
+
+The extra local day is intentional. It supports the 21:00 next-day digest and allows reminder buckets for meetings shortly after midnight tomorrow to exist before midnight today.
+
+For normal Nextcloud calendars, use a CalDAV `REPORT calendar-query` with a `VEVENT` `time-range` bounded to the two-day horizon. For `subscription_ics` calendars, fetch the external ICS source and filter/expand locally to the same horizon.
+
+A calendar fetch failure must not be interpreted as event deletion. State is partitioned per calendar:
+
+- successful scan: the new per-calendar snapshot is authoritative; stale owned keys are deleted;
+- temporary fetch/parse failure for a calendar still present in the discovery cache: preserve that calendar's previous Redis keys and mark its scan state `stale_preserved`;
+- calendar removed from the discovery cache: delete the keys previously owned by that calendar.
+
+This prevents a transient Nextcloud/Google fetch error from causing a mass deletion of reminders.
+
+The scanner stores hashes of Redis values in its scan state and only rewrites changed/new scheduling keys. Scan-state schema v2 stores lightweight per-calendar `eventSnapshots` for the active two-day comparison horizon.
+
+Change/deletion detection only runs after a **successful** fetch for that calendar. A failed fetch preserves the previous snapshot and must never create deletion/change notices. Naturally elapsed events are not treated as deletions. Common reschedules where an occurrence identity changes are paired by UID when the match is unambiguous inside the bounded horizon.
+
+The authoritative scan-state write is deliberately delayed until after change/deletion notification delivery is confirmed. If a change/deletion ntfy send fails, or this execution loses the atomic delivery claim to an overlapping execution, this execution does **not** advance the scan state. That lets the same transition retry safely on a later run.
+
+### Redis event/reminder schema
+
+Default reminder offsets:
+
+- 30 minutes before
+- 10 minutes before
+- 1 minute before
+
+Current Redis keys:
+
+```text
+calendar-notifier:event:v1:<calendarId>:<occurrenceId>
+calendar-notifier:events:day:v1:<YYYY-MM-DD>:<calendarId>
+calendar-notifier:reminders:v1:<offsetMinutes>:<UTC-minute>:<calendarId>
+calendar-notifier:scan-state:v1:<YYYY-MM-DD>
+calendar-notifier:message:v1:<calendarId>:<messageId>
+
+calendar-notifier:sent:v1:reminder:<offsetMinutes>:<UTC-minute>:<eventKey>
+calendar-notifier:sent:v1:change:<messageId>
+calendar-notifier:sent:v1:digest:<YYYY-MM-DD>
+
+calendar-notifier:claim:v1:<same suffix as sent marker>
+```
+
+`calendarId` is a stable hash of the calendar source identity. Event occurrence keys are derived from calendar + UID + recurrence identity so recurring instances do not collide.
+
+Reminder buckets use the UTC minute at or immediately after the exact reminder trigger time (`ceil` to the next minute). This prevents a reminder from being sent early when an event DTSTART includes seconds. Each bucket contains one or more entries with the referenced `eventKey`, event revision hash, offset, exact scheduled time, scheduled minute, title, calendar name, start time, all-day state, and normalized meeting link.
+
+The delivery phase reads the current and previous few due-minute buckets. Current catch-up window: **5 minutes**. It still checks the exact `scheduledForUtc` so future reminders from the same minute bucket are not sent early.
+
+Event/day/reminder scheduling keys have bounded TTLs long enough to survive through the active two-day horizon plus several hours. Permanent notification sent markers currently live for **14 days**.
+
+### Notification idempotency and overlap safety
+
+Before publishing a candidate notification, the scanner first checks its permanent `calendar-notifier:sent:v1:*` marker. If no permanent marker exists, it atomically increments a short claim key using the n8n Redis node's `INCR` operation.
+
+Claim behavior:
+
+- claim result `1`: this execution owns delivery and may call ntfy;
+- claim result `>1`: another overlapping execution already owns delivery, so this execution does not send;
+- claim TTL: **120 seconds**;
+- successful ntfy delivery: write the permanent 14-day sent marker;
+- failed ntfy delivery after winning the claim: delete the claim immediately so the next minute can retry;
+- workflow crash after winning a claim: the claim expires automatically after 120 seconds.
+
+For change/deletion notifications, losing a claim is treated as "delivery not yet confirmed" for scan-state purposes. The losing execution therefore does not advance authoritative scan state. The winning execution may advance it after successful delivery; if the winner crashes, a later execution can retry after the short claim expires.
+
+### Event-change messages
+
+Current message types:
+
+- `event_changed`: emitted when a previously known upcoming occurrence changes in a user-relevant field;
+- `event_deleted`: emitted when a previously known future occurrence is missing after a successful authoritative fetch. Explicit ICS/CalDAV `STATUS:CANCELLED` records use the same message type with `reason: "cancelled"`; otherwise the reason is `missing_after_successful_scan`.
+
+Meaningful change fields are title, start time, end time, location, meeting URL/type, and all-day state. Description/body churn is intentionally not considered by itself to avoid noisy provider-generated updates; meeting-link changes embedded in description are still detected through normalized `meetingUrl`.
+
+Each transition is also staged as an independent Redis message record under `calendar-notifier:message:v1:<calendarId>:<messageId>` with a 48-hour TTL. Message IDs are derived from the transition contents, so retrying the same comparison regenerates the same message/sent-marker identity.
+
+ntfy formatting:
+
+- `event_changed`: title `Meeting changed: <event>` and a body containing calendar, local time, changed fields, and join link when available;
+- `event_deleted`: title `Meeting deleted: <event>` or `Meeting cancelled: <event>` for explicit cancellations;
+- meeting link is also used as ntfy `click` target when present.
+
+### Reminder delivery
+
+Reminder notifications are generated from Redis reminder buckets, not by re-scanning the in-memory event list during the delivery phase.
+
+For each due entry the sender:
+
+1. derives the per-event/per-offset permanent sent key;
+2. skips entries whose permanent sent marker already exists;
+3. acquires the short atomic Redis claim;
+4. sends through ntfy only when the claim result is `1`;
+5. writes the permanent sent marker only after a successful ntfy response.
+
+Reminder body includes local event time, calendar name, and the meeting link when available. The meeting link is also set as ntfy's `click` target.
+
+### Daily next-day digest
+
+The scanner maintains per-calendar day snapshots for both today and tomorrow:
+
+```text
+calendar-notifier:events:day:v1:<YYYY-MM-DD>:<calendarId>
+```
+
+At/after **21:00 in `TIMEZONE`**, if the target-date marker does not exist, the sender reads tomorrow's cached snapshot for every known calendar, merges and sorts all events by start time, and sends one ntfy digest.
+
+Digest marker:
+
+```text
+calendar-notifier:sent:v1:digest:<tomorrow YYYY-MM-DD>
+```
+
+The marker is keyed by the **day being summarized**, not the day on which the message was sent. This guarantees one digest per target day across retries. If the workflow is temporarily down at exactly 21:00 but resumes later the same evening, `dueNow` remains true and the missing digest can still be sent before midnight.
+
+If a calendar's tomorrow snapshot is unavailable, the digest includes a warning naming that calendar rather than silently pretending the calendar had no meetings. Successfully cached stale snapshots from a temporarily failing calendar remain available because failed calendar scans preserve prior Redis state.
+
+Digest entries include the local start time (or `All day`), event title, calendar name, and meeting link when present. A no-meeting day still produces a digest saying that no meetings are scheduled.
+
+### Event normalization and time zones
+
+The configured `TIMEZONE` is the notification/output time zone. Event time zones from ICS/CalDAV data must be respected first, then converted to `TIMEZONE` for scheduling and rendering. Do not assume event timestamps are already in the configured zone.
+
+The scanner supports UTC timestamps, floating/local ICS timestamps, IANA TZIDs, and a mapping for common Microsoft Windows time-zone IDs. `X-WR-TIMEZONE` is used as a calendar-level fallback where available; otherwise floating timestamps fall back to configured `TIMEZONE`.
+
+Recurring event handling covers the common meeting recurrence families (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`, plus bounded `HOURLY`/`MINUTELY`), along with `RRULE`, `RDATE`, `EXDATE`, `RECURRENCE-ID`, cancelled overrides, `COUNT`, and `UNTIL`. Recurrence expansion is intentionally bounded and protected by an iteration limit.
+
+### Meeting-link extraction
+
+Meeting notifications should include a join link whenever one can be found. The two primary meeting families are:
+
+- Google Calendar / Google Meet
+- Microsoft Teams
+
+The event scanner searches URL-bearing event fields including `URL`, `LOCATION`, `DESCRIPTION`, and vendor/conference properties. It recognizes common Google Meet URLs (`meet.google.com`, `g.co/meet`) and Microsoft Teams meeting URLs (`teams.microsoft.com/l/meetup-join`, `teams.microsoft.com/meet`, `teams.live.com/meet`).
+
+The chosen link is stored on the normalized event as:
+
+```text
+meetingUrl
+meetingType
+```
+
+ntfy formatting consumes these normalized fields rather than rediscovering the link.
+
+### Current implementation boundary
+
+Implemented:
+
+- calendar discovery and persistent source caching;
+- bounded two-day upcoming event scan;
+- CalDAV `REPORT` for normal Nextcloud calendars;
+- direct external ICS fetch for subscriptions;
+- recurrence/time-zone normalization;
+- Google Meet / Microsoft Teams URL extraction;
+- Redis event keys, per-day snapshots, reminder buckets, stale-key deletion, and per-calendar failure preservation;
+- `event_changed` / `event_deleted` detection;
+- ntfy reminder/change/deletion delivery;
+- Redis sent markers and atomic short delivery claims;
+- 21:00 next-day digest with per-target-day sent marker;
+- midnight-boundary reminder support through the two-day scan horizon.
+
+Not currently split into a separate sender workflow: the every-minute scanner both refreshes Redis scheduling state and performs the delivery phase. This is an accepted implementation variation from the original idea where the first workflow would fetch calendars/events and a second workflow would be a purely mindless sender.
+
+### Validation notes
+
+The current scanner export has been statically syntax-checked and simulated with:
+
+- one current-day Google Meet event and one next-day Microsoft Teams event;
+- 30-minute due reminder delivery;
+- 21:00 next-day digest aggregation;
+- permanent sent-marker suppression on a second delivery pass;
+- overlapping delivery claims where the first execution gets claim `1` and a second gets `2` and does not send;
+- change notification formatting;
+- failed change ntfy delivery preventing authoritative scan-state advancement.
+
+### Research / compatibility notes
+
+- Nextcloud DAV base/auth behavior: https://docs.nextcloud.com/server/latest/developer_manual/client_apis/WebDAV/basic.html
+- Nextcloud current CalDAV backend exposes subscription `source` and stores calendar subscriptions separately: https://github.com/nextcloud/server/blob/master/apps/dav/lib/CalDAV/CalDavBackend.php
+- Nextcloud calendar resources classify a resource as a subscription when the CalendarServer `source` property is present: https://github.com/nextcloud/server/blob/master/apps/dav/lib/CalDAV/Calendar.php
+- Nextcloud calendar ICS exports use the calendar DAV URL with `?export`; external subscriptions use the original source ICS URL.
+- n8n's Redis node supports an atomic `INCR` operation and optional TTL; the notification workflow uses it for short delivery claims.
+
+### n8n 2.7.3 / CalDAV implementation note
+
+- The target n8n instance is currently 2.7.3. At that version the HTTP Request node does not have the required WebDAV methods in the workflow design, so CalDAV `PROPFIND`/`REPORT` operations remain in Code nodes using `this.helpers.httpRequest`.
+- DAV calls use full responses and `ignoreHttpStatusErrors: true` so Nextcloud/reverse-proxy error bodies can be surfaced with useful diagnostics.
+- In this n8n 2.7.3 task-runner environment, do not rely on the WHATWG global `URL` constructor inside Code nodes. Calendar discovery uses string-based HTTP(S) URL parsing/resolution so valid values such as `https://cloud.idle.laziness.rocks` work in the sandbox.

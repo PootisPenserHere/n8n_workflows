@@ -1,0 +1,271 @@
+{
+  "name": "Calendar Notifications - Discover Nextcloud Calendars",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "1e5857fc-24f9-4ff8-828a-963cda4fa3ee",
+      "name": "Schedule - Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        48,
+        320
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "14763278-7311-426b-a5d1-3c54eb79a5b2",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        48,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT name, data FROM public.key_value_store WHERE name IN ('NEXCLOUD_BASE_URL', 'NEXCLOUD_CALENDAR_USER', 'NEXCLOUD_CALENDAR_PASSWORD', 'TIMEZONE', 'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD', 'REDIS_DATABASE')",
+        "options": {}
+      },
+      "id": "bde12f81-bb08-4a2f-ab8c-30dbc34ac1d8",
+      "name": "Get Calendar Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        288,
+        416
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((item) => item.json || {});\nconst values = {};\nconst presentKeys = new Set();\n\nfor (const row of rows) {\n  if (typeof row.name === 'string') {\n    presentKeys.add(row.name);\n    values[row.name] = row.data;\n  }\n}\n\nconst requiredKeys = [\n  'NEXCLOUD_BASE_URL',\n  'NEXCLOUD_CALENDAR_USER',\n  'NEXCLOUD_CALENDAR_PASSWORD',\n  'TIMEZONE',\n  'REDIS_HOST',\n  'REDIS_PORT',\n  'REDIS_PASSWORD',\n  'REDIS_DATABASE',\n];\n\nconst missing = requiredKeys.filter((key) => !presentKeys.has(key));\nif (missing.length) {\n  throw new Error(`Missing required public.key_value_store keys: ${missing.join(', ')}`);\n}\n\nconst baseUrl = String(values.NEXCLOUD_BASE_URL ?? '').trim().replace(/\\/+$/, '');\nconst user = String(values.NEXCLOUD_CALENDAR_USER ?? '').trim();\nconst password = String(values.NEXCLOUD_CALENDAR_PASSWORD ?? '');\nconst timezone = String(values.TIMEZONE ?? '').trim();\nconst redisHost = String(values.REDIS_HOST ?? '').trim();\nconst redisPort = Number(values.REDIS_PORT);\nconst redisDatabase = Number(values.REDIS_DATABASE);\n\nif (!baseUrl || !user || !timezone || !redisHost) {\n  throw new Error('NEXCLOUD_BASE_URL, NEXCLOUD_CALENDAR_USER, TIMEZONE, and REDIS_HOST must not be empty');\n}\nif (!Number.isInteger(redisPort) || redisPort <= 0 || redisPort > 65535) {\n  throw new Error(`Invalid REDIS_PORT: ${values.REDIS_PORT}`);\n}\nif (!Number.isInteger(redisDatabase) || redisDatabase < 0) {\n  throw new Error(`Invalid REDIS_DATABASE: ${values.REDIS_DATABASE}`);\n}\n\nreturn [{\n  json: {\n    nextcloud: {\n      baseUrl,\n      user,\n      password,\n    },\n    timezone,\n    redisExpected: {\n      host: redisHost,\n      port: redisPort,\n      database: redisDatabase,\n      passwordConfigured: String(values.REDIS_PASSWORD ?? '').length > 0,\n    },\n    cache: {\n      key: 'calendar-notifier:calendar-sources:v1',\n      persistent: true,\n      schemaVersion: 1,\n    },\n  },\n}];"
+      },
+      "id": "0cfeb033-e097-447c-b1e6-f9f587a632db",
+      "name": "Format & Validate Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst configuredBaseUrl = String(cfg.nextcloud.baseUrl || '').trim();\nconst user = cfg.nextcloud.user;\nconst password = cfg.nextcloud.password;\n\n// Normalize and resolve URLs without relying on the WHATWG `URL` global.\n// n8n 2.7.x task-runner sandboxes may not expose `URL` inside Code nodes.\nconst parseAbsoluteHttpUrl = (value) => {\n  const text = String(value || '').trim();\n  const match = text.match(/^(https?):\\/\\/([^\\/?#]+)(\\/[^?#]*)?(?:\\?[^#]*)?(?:#.*)?$/i);\n  if (!match) return null;\n  return {\n    scheme: match[1].toLowerCase(),\n    authority: match[2],\n    origin: `${match[1].toLowerCase()}://${match[2]}`,\n    path: match[3] || '/',\n  };\n};\n\nconst normalizePath = (value) => {\n  const parts = [];\n  for (const part of String(value || '/').split('/')) {\n    if (!part || part === '.') continue;\n    if (part === '..') {\n      parts.pop();\n      continue;\n    }\n    parts.push(part);\n  }\n  return `/${parts.join('/')}`;\n};\n\nconst ensureTrailingSlash = (value) => value.endsWith('/') ? value : `${value}/`;\n\nconst resolveUrl = (href, base) => {\n  const raw = String(href || '').trim();\n  if (!raw) return null;\n  if (/^https?:\\/\\//i.test(raw)) return raw;\n\n  const parsedBase = parseAbsoluteHttpUrl(base);\n  if (!parsedBase) return raw;\n  if (raw.startsWith('//')) return `${parsedBase.scheme}:${raw}`;\n\n  if (raw.startsWith('/')) {\n    return `${parsedBase.origin}${normalizePath(raw)}${raw.endsWith('/') ? '/' : ''}`.replace(/([^:]\\/)\\/+/g, '$1');\n  }\n\n  const basePath = parsedBase.path.endsWith('/')\n    ? parsedBase.path\n    : parsedBase.path.replace(/\\/[^/]*$/, '/');\n  const resolvedPath = normalizePath(`${basePath}/${raw}`);\n  return `${parsedBase.origin}${resolvedPath}${raw.endsWith('/') ? '/' : ''}`.replace(/([^:]\\/)\\/+/g, '$1');\n};\n\nconst parsedConfiguredBase = parseAbsoluteHttpUrl(configuredBaseUrl);\nif (!parsedConfiguredBase) {\n  throw new Error(`NEXCLOUD_BASE_URL is not a valid absolute HTTP(S) URL: ${configuredBaseUrl}`);\n}\n\nlet instancePath = parsedConfiguredBase.path.replace(/\\/+$/, '');\nconst davMarker = '/remote.php/dav';\nconst davIndex = instancePath.indexOf(davMarker);\nif (davIndex >= 0) instancePath = instancePath.slice(0, davIndex);\nif (instancePath === '/') instancePath = '';\n\nconst instanceBaseUrl = `${parsedConfiguredBase.origin}${instancePath}`;\nconst davRootUrl = `${instanceBaseUrl}${davMarker}/`;\n\nconst decodeXml = (value = '') => String(value)\n  .replace(/&lt;/gi, '<')\n  .replace(/&gt;/gi, '>')\n  .replace(/&quot;/gi, '\"')\n  .replace(/&apos;/gi, \"'\")\n  .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n)))\n  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))\n  .replace(/&amp;/gi, '&');\n\nconst textContent = (fragment = '') => decodeXml(\n  String(fragment)\n    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n    .replace(/<[^>]+>/g, '')\n    .trim(),\n);\n\nconst firstTag = (block, tag) => {\n  const re = new RegExp(`<(?:\\\\w+:)?${tag}\\\\b[^>]*>([\\\\s\\\\S]*?)<\\\\/(?:\\\\w+:)?${tag}>`, 'i');\n  return String(block || '').match(re)?.[1] ?? null;\n};\n\nconst firstHref = (block) => {\n  const inner = firstTag(block, 'href');\n  return inner === null ? null : textContent(inner);\n};\n\nconst absoluteUrl = (href, base = davRootUrl) => resolveUrl(href, base);\n\nconst bodyToText = (body) => {\n  if (body === undefined || body === null) return '';\n  if (typeof body === 'string') return body;\n  if (Buffer.isBuffer(body)) return body.toString('utf8');\n  if (typeof body === 'object') {\n    try { return JSON.stringify(body); } catch { return String(body); }\n  }\n  return String(body);\n};\n\nconst compactPreview = (value, max = 1400) => String(value || '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, max);\n\nconst statusHint = (status, responseBody, requestUrl) => {\n  const lower = String(responseBody || '').toLowerCase();\n\n  if (status === 400 && (lower.includes('trusted domain') || lower.includes('untrusted domain'))) {\n    const host = parseAbsoluteHttpUrl(requestUrl)?.authority || requestUrl;\n    return `Nextcloud rejected the Docker-network hostname as an untrusted domain. Add \"${host}\" to Nextcloud trusted_domains (or use an internal URL whose host is already trusted).`;\n  }\n  if (status === 400) {\n    return 'Nextcloud returned HTTP 400. The response preview below should contain the server reason. Common causes are an untrusted Docker hostname, a malformed NEXCLOUD_BASE_URL, or a reverse proxy rejecting WebDAV requests.';\n  }\n  if (status === 401 || status === 403) {\n    return 'Authentication was rejected. Verify NEXCLOUD_CALENDAR_USER/PASSWORD. If the account uses 2FA or external authentication, use a Nextcloud app password for DAV access.';\n  }\n  if (status === 404) {\n    return 'The DAV endpoint was not found. NEXCLOUD_BASE_URL should point to the Nextcloud instance root (or directly to /remote.php/dav), including any installation subpath.';\n  }\n  if (status === 405 || status === 501) {\n    return 'PROPFIND is being rejected by the HTTP server or reverse proxy. Ensure WebDAV methods are allowed between n8n and the internal Nextcloud service.';\n  }\n  return 'Check the response preview and Nextcloud/reverse-proxy logs for the matching request.';\n};\n\nconst propfind = async (label, url, depth, body) => {\n  const response = await this.helpers.httpRequest({\n    method: 'PROPFIND',\n    url,\n    auth: {\n      username: user,\n      password,\n    },\n    headers: {\n      Depth: String(depth),\n      Accept: 'application/xml, text/xml;q=0.9, */*;q=0.1',\n      'Content-Type': 'application/xml; charset=UTF-8',\n    },\n    body,\n    encoding: 'text',\n    timeout: 30000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n\n  const status = Number(response?.statusCode ?? 0);\n  const xml = bodyToText(response?.body);\n\n  if (status < 200 || status >= 300) {\n    const hint = statusHint(status, xml, url);\n    const preview = compactPreview(xml) || '(empty response body)';\n    throw new Error(`${label} failed with HTTP ${status || 'unknown'} at ${url}. ${hint} Response: ${preview}`);\n  }\n\n  if (!/<(?:\\w+:)?multistatus\\b/i.test(xml)) {\n    const preview = compactPreview(xml) || '(empty response body)';\n    throw new Error(`${label} returned HTTP ${status} but not a DAV multistatus document at ${url}. Response: ${preview}`);\n  }\n\n  return { status, xml };\n};\n\n// Step 1: ask DAV who the authenticated principal actually is. This avoids\n// assuming that NEXCLOUD_CALENDAR_USER is identical to the internal Nextcloud UID.\nconst principalRequestBody = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<d:propfind xmlns:d=\"DAV:\">\n  <d:prop>\n    <d:current-user-principal />\n  </d:prop>\n</d:propfind>`;\n\nconst principalDiscovery = await propfind(\n  'Nextcloud DAV principal discovery',\n  davRootUrl,\n  0,\n  principalRequestBody,\n);\n\nconst principalBlock = firstTag(principalDiscovery.xml, 'current-user-principal');\nlet principalHref = principalBlock === null ? null : firstHref(principalBlock);\nlet principalUrl = absoluteUrl(principalHref);\nlet principalDiscoveryMode = 'dav_current_user_principal';\n\nif (!principalUrl) {\n  principalUrl = resolveUrl(`principals/users/${encodeURIComponent(user)}/`, davRootUrl);\n  principalDiscoveryMode = 'username_fallback';\n}\n\n// Step 2: ask the principal for its calendar home. This is more robust than\n// directly constructing /calendars/<login>/ for installations with non-trivial UIDs.\nconst calendarHomeRequestBody = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<d:propfind xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\n  <d:prop>\n    <c:calendar-home-set />\n  </d:prop>\n</d:propfind>`;\n\nconst calendarHomeDiscovery = await propfind(\n  'Nextcloud CalDAV calendar-home discovery',\n  principalUrl,\n  0,\n  calendarHomeRequestBody,\n);\n\nconst homeBlock = firstTag(calendarHomeDiscovery.xml, 'calendar-home-set');\nlet calendarHomeHref = homeBlock === null ? null : firstHref(homeBlock);\nlet calendarHomeUrl = absoluteUrl(calendarHomeHref, principalUrl);\nlet calendarHomeDiscoveryMode = 'caldav_calendar_home_set';\n\nif (!calendarHomeUrl) {\n  calendarHomeUrl = resolveUrl(`calendars/${encodeURIComponent(user)}/`, davRootUrl);\n  calendarHomeDiscoveryMode = 'username_fallback';\n}\n\nif (!calendarHomeUrl.endsWith('/')) calendarHomeUrl += '/';\n\n// Step 3: list every calendar/subscription in the calendar home.\nconst calendarsRequestBody = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<d:propfind xmlns:d=\"DAV:\"\n            xmlns:c=\"urn:ietf:params:xml:ns:caldav\"\n            xmlns:cs=\"http://calendarserver.org/ns/\"\n            xmlns:oc=\"http://owncloud.org/ns\">\n  <d:prop>\n    <d:displayname />\n    <d:resourcetype />\n    <cs:source />\n    <c:supported-calendar-component-set />\n    <oc:read-only />\n  </d:prop>\n</d:propfind>`;\n\nconst calendarDiscovery = await propfind(\n  'Nextcloud calendar listing',\n  calendarHomeUrl,\n  1,\n  calendarsRequestBody,\n);\n\nconst normalizeSubscriptionUrl = (value) => {\n  if (!value) return null;\n  let url = value.trim();\n  if (/^webcal:\\/\\//i.test(url)) url = url.replace(/^webcal:/i, 'http:');\n  if (/^webcals:\\/\\//i.test(url)) url = url.replace(/^webcals:/i, 'https:');\n  return url;\n};\n\nconst responseBlocks = calendarDiscovery.xml.match(/<(?:\\w+:)?response\\b[^>]*>[\\s\\S]*?<\\/(?:\\w+:)?response>/gi) || [];\nconst calendars = [];\n\nfor (const block of responseBlocks) {\n  const href = firstHref(block);\n  if (!href) continue;\n\n  const resourceType = firstTag(block, 'resourcetype') || '';\n  const components = firstTag(block, 'supported-calendar-component-set') || '';\n  const sourceBlock = firstTag(block, 'source');\n\n  let subscriptionSource = null;\n  if (sourceBlock !== null) {\n    subscriptionSource = firstHref(sourceBlock) || textContent(sourceBlock) || null;\n    subscriptionSource = normalizeSubscriptionUrl(subscriptionSource);\n  }\n\n  const isSubscription = Boolean(subscriptionSource);\n  const isCalendarResource = /<(?:\\w+:)?calendar\\b/i.test(resourceType);\n  const isSubscribedResource = /<(?:\\w+:)?subscribed\\b/i.test(resourceType);\n\n  // Skip the calendar-home collection and DAV children such as inbox/outbox.\n  if (!isSubscription && !isCalendarResource && !isSubscribedResource) continue;\n\n  const caldavUrl = absoluteUrl(href, calendarHomeUrl);\n  const displayNameBlock = firstTag(block, 'displayname');\n  const displayName = displayNameBlock === null ? null : textContent(displayNameBlock);\n  const parsedCaldavUrl = parseAbsoluteHttpUrl(caldavUrl);\n  const pathParts = (parsedCaldavUrl?.path || String(href)).split('/').filter(Boolean);\n  const calendarUri = decodeURIComponent(pathParts[pathParts.length - 1] || '');\n  const readOnlyBlock = firstTag(block, 'read-only');\n  const readOnlyText = readOnlyBlock === null ? '' : textContent(readOnlyBlock).toLowerCase();\n  const readOnly = readOnlyBlock !== null && !['', '0', 'false', 'no'].includes(readOnlyText);\n\n  const icsUrl = isSubscription\n    ? subscriptionSource\n    : `${caldavUrl}${caldavUrl.includes('?') ? '&' : '?'}export`;\n\n  calendars.push({\n    calendarUri,\n    displayName: displayName || calendarUri || caldavUrl,\n    kind: isSubscription ? 'subscription_ics' : 'nextcloud_caldav',\n    isSubscription,\n    supportsVEvent: /VEVENT/i.test(components),\n    supportsVTodo: /VTODO/i.test(components),\n    readOnly,\n    caldavUrl,\n    subscriptionSourceUrl: isSubscription ? subscriptionSource : null,\n    icsUrl,\n    fetchAuth: isSubscription ? 'none' : 'nextcloud_basic',\n  });\n}\n\ncalendars.sort((a, b) => a.displayName.localeCompare(b.displayName));\n\nconst deduped = [];\nconst seen = new Set();\nfor (const calendar of calendars) {\n  const key = `${calendar.kind}|${calendar.icsUrl}`;\n  if (seen.has(key)) continue;\n  seen.add(key);\n  deduped.push(calendar);\n}\n\nconst warnings = [];\nif (deduped.length === 0) {\n  warnings.push('No calendar resources were discovered. Verify the Nextcloud account has calendars visible through CalDAV.');\n}\n\nreturn [{\n  json: {\n    status: warnings.length ? 'ok_with_warnings' : 'ok',\n    discoveredAt: new Date().toISOString(),\n    timezone: cfg.timezone,\n    instanceBaseUrl,\n    davRootUrl,\n    principalUrl,\n    principalDiscoveryMode,\n    calendarHomeUrl,\n    calendarHomeDiscoveryMode,\n    calendarCount: deduped.length,\n    subscriptionCount: deduped.filter((c) => c.isSubscription).length,\n    calendars: deduped,\n    cache: cfg.cache,\n    redisExpected: cfg.redisExpected,\n    warnings,\n    metadata: {\n      discoveryMethod: 'dav_principal_then_caldav_home_then_propfind_depth_1',\n      n8nCompatibility: '2.7.3_code_node_propfind_workaround',\n      subscriptionDetection: 'calendarserver.org/ns/source',\n      normalCalendarReadMode: 'nextcloud_ics_export',\n      subscriptionReadMode: 'direct_external_ics',\n    },\n  },\n}];"
+      },
+      "id": "1fa81dee-e8f0-4d4a-9c14-7365e46ff85a",
+      "name": "Discover Nextcloud Calendars",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst cachePayload = {\n  schemaVersion: data.cache.schemaVersion,\n  generatedAt: data.discoveredAt,\n  timezone: data.timezone,\n  calendarHomeUrl: data.calendarHomeUrl,\n  calendars: data.calendars,\n};\n\nreturn [{\n  json: {\n    ...data,\n    cachePayload,\n  },\n}];"
+      },
+      "id": "f2cbafe1-66a7-4ba9-899c-2b711284316a",
+      "name": "Prepare Cache Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.cache.key }}",
+        "value": "={{ JSON.stringify($json.cachePayload) }}",
+        "keyType": "string"
+      },
+      "id": "8cc12e8c-c9ed-4aa7-bcbb-fde522f2a635",
+      "name": "Cache Calendar Sources",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1312,
+        416
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst { cachePayload, ...rest } = data;\n\nreturn [{\n  json: {\n    ...rest,\n    cache: {\n      ...rest.cache,\n      written: true,\n    },\n  },\n}];"
+      },
+      "id": "fc617986-87fb-43fa-8319-52c808637857",
+      "name": "Discovery Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Discovery frequency\nDefault: **every 15 minutes**.\n\nChange the cron expression on **Schedule - Every 15 Minutes** if you want a different refresh frequency. The future notification workflow will run separately every minute.",
+        "height": 210,
+        "width": 390,
+        "color": 4
+      },
+      "id": "81aff1d1-2796-4879-96db-33d42a3a0071",
+      "name": "Frequency Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Credentials / connectivity\n\nConfiguration is read from `public.key_value_store`.\n\nRequired Nextcloud keys:\n- `NEXCLOUD_BASE_URL`\n- `NEXCLOUD_CALENDAR_USER`\n- `NEXCLOUD_CALENDAR_PASSWORD`\n\nRequired Redis keys are validated here; the actual n8n Redis credential must point at the same Redis instance/database:\n- `REDIS_HOST`\n- `REDIS_PORT`\n- `REDIS_PASSWORD`\n- `REDIS_DATABASE`\n\n### n8n 2.7.3 note\nThis workflow intentionally performs `PROPFIND` from the Code node. n8n 2.7.3 predates first-class WebDAV methods in the HTTP Request node.\n\nIf Nextcloud returns HTTP 400 and mentions **trusted domains**, add the Docker-network Nextcloud host from `NEXCLOUD_BASE_URL` to Nextcloud `trusted_domains`. The discovery node now includes the actual response body in its error message.\n\n### Source registry durability\n`calendar-notifier:calendar-sources:v1` is intentionally **persistent (no Redis TTL)**. The 15-minute discovery job refreshes it in place. This lets the every-minute event scanner continue using the last known-good source registry if discovery is temporarily stopped or fails.",
+        "height": 300,
+        "width": 460,
+        "color": 5
+      },
+      "id": "585b8807-ab5d-429c-82a3-afec2e63724c",
+      "name": "Credentials & Redis Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        464,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Cached calendar-source contract\nRedis key: `calendar-notifier:calendar-sources:v1`\nTTL: **3600 seconds**\n\nNormal Nextcloud calendar:\n- `kind: nextcloud_caldav`\n- `icsUrl: <calendar DAV URL>?export`\n- `fetchAuth: nextcloud_basic`\n\nSubscribed calendar:\n- detected from CalDAV `calendarserver.org/ns/source`\n- `kind: subscription_ics`\n- `icsUrl`: original external ICS URL\n- `fetchAuth: none`\n\nThis workflow only discovers/caches sources. Event parsing and notifications are intentionally deferred.",
+        "height": 390,
+        "width": 500,
+        "color": 6
+      },
+      "id": "447812b7-48e7-481a-bb06-e4a6266bfd06",
+      "name": "Calendar Source Contract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule - Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Calendar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Get Calendar Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Calendar Config": {
+      "main": [
+        [
+          {
+            "node": "Format & Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format & Validate Config": {
+      "main": [
+        [
+          {
+            "node": "Discover Nextcloud Calendars",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discover Nextcloud Calendars": {
+      "main": [
+        [
+          {
+            "node": "Prepare Cache Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Cache Payload": {
+      "main": [
+        [
+          {
+            "node": "Cache Calendar Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Calendar Sources": {
+      "main": [
+        [
+          {
+            "node": "Discovery Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "0901a6bb-c126-40a6-bd94-24dbd1810fbd",
+  "meta": {
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "KltGpMrXS1HNx7Nr",
+  "tags": []
+}
