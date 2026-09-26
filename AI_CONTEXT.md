@@ -882,21 +882,24 @@ The successful current-response path deletes any active current-endpoint error m
 
 ### Reportable-condition decision
 
-The canonical quiet/routine WeatherAPI condition-code set is:
+The canonical suppressed WeatherAPI condition-code set for current alerts is:
 
 ```text
-1000
-1003
-1006
-1009
+1000  Sunny / Clear
+1003  Partly cloudy
+1006  Cloudy
+1009  Overcast
+1030  Mist
+1135  Fog
+1147  Freezing fog
 ```
 
-These correspond to the normal clear/partly-cloudy/cloudy/overcast family represented by the WeatherAPI response used when this workflow was created. The implementation uses the numeric code set, not localized condition text.
+The implementation uses numeric codes, not localized condition text. Mist/Fog/Freezing fog are intentionally suppressed because they are too noisy for this notification use case.
 
 Current rule:
 
 ```text
-reportable = numeric condition code AND code not in {1000,1003,1006,1009}
+reportable = numeric condition code AND code not in {1000,1003,1006,1009,1030,1135,1147}
 ```
 
 Do not silently broaden/narrow this set during maintenance. A classification change is a product-behavior change and must update both the workflow README and this AI context.
@@ -1037,14 +1040,14 @@ Hourly periods are considered significant when at least one is true:
 chance_of_rain >= 30
 chance_of_snow >= 20
 precip_mm > 0
-condition code not in {1000,1003,1006,1009}
+condition code not in {1000,1003,1006,1009,1030,1135,1147}
 ```
 
-At most 12 significant hours are rendered individually. If more are found, the message adds a count of the remaining significant hours. If none are found, the report explicitly states that no significant rain, snow, or adverse hourly conditions are expected.
+Mist/Fog/Freezing-fog codes (`1030`, `1135`, `1147`) do not make an hour significant by themselves. If one of those hours independently meets a rain/snow/precipitation threshold, it remains in the report but the fog/mist condition label is omitted. Every significant hourly period available in the WeatherAPI response is rendered; there is no 12-hour truncation. If none are found, the report explicitly states that no significant rain, snow, or adverse hourly conditions are expected.
 
-Hourly lines can include hour, condition, temperature, rain/snow probability, precipitation, and gust speed when `gust_kph >= 30`.
+Hourly lines can include hour, condition (unless it is suppressed fog/mist), temperature, rain/snow probability, precipitation, and gust speed when `gust_kph >= 30`.
 
-The daily condition image is normalized in the same way as current conditions and sent as ntfy `icon` + `attach` with filename `weather-forecast.png` when present.
+If the daily condition is Mist, Fog, or Freezing fog, its condition text and icon/attachment are omitted from the next-day message. Other daily condition images are normalized in the same way as current conditions and sent as ntfy `icon` + `attach` with filename `weather-forecast.png` when present.
 
 ### ntfy HTTP contract
 

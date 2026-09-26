@@ -41,7 +41,7 @@ Runs every five minutes. It:
 
 - reads WeatherAPI, location, time-zone, ntfy, and topic settings from `public.key_value_store` using the existing `automation-db` PostgreSQL credential;
 - fetches the current weather for the configured latitude/longitude;
-- treats WeatherAPI condition codes `1000`, `1003`, `1006`, and `1009` as routine and suppresses alerts for them;
+- treats WeatherAPI condition codes `1000`, `1003`, `1006`, `1009`, `1030`, `1135`, and `1147` as suppressed for current-condition alerts; the added codes are Mist, Fog, and Freezing fog;
 - treats any other numeric WeatherAPI condition code as reportable;
 - uses a Redis marker per active condition code to avoid repeatedly notifying while that condition remains active;
 - refreshes an existing active-condition marker to a 15-minute TTL on every matching five-minute check;
@@ -95,9 +95,12 @@ The quiet/routine WeatherAPI condition-code set is:
 1003  Partly Cloudy
 1006  Cloudy
 1009  Overcast
+1030  Mist
+1135  Fog
+1147  Freezing fog
 ```
 
-All other numeric condition codes are currently considered reportable. This is intentionally simple and code-driven: future changes to what counts as noteworthy should update both the `Classify Current Conditions` Code node and this documentation/`AI_CONTEXT.md`.
+All other numeric condition codes are currently considered reportable. Fog/mist are intentionally suppressed because they are too noisy for this notification use case. This is intentionally simple and code-driven: future changes to what counts as noteworthy should update both the `Classify Current Conditions` Code node and this documentation/`AI_CONTEXT.md`.
 
 A current-condition notification includes, when present:
 
@@ -158,16 +161,16 @@ GET https://api.weatherapi.com/v1/forecast.json
 
 The workflow selects the forecast matching the computed next-local-day date, with positional fallbacks if necessary.
 
-The report contains the daily condition plus available minimum, maximum, and average temperature, rain/snow chance, total precipitation, max wind, and average humidity. It also lists up to 12 significant hourly periods.
+The report contains the daily condition plus available minimum, maximum, and average temperature, rain/snow chance, total precipitation, max wind, and average humidity. If the daily condition is Mist, Fog, or Freezing fog, that condition label/icon is omitted. It lists every significant hourly period returned by WeatherAPI rather than truncating the list.
 
 An hourly period is considered significant when any of these is true:
 
 - rain chance is at least 30%;
 - snow chance is at least 20%;
 - forecast precipitation is greater than 0 mm;
-- the WeatherAPI condition code is not one of the four routine codes above.
+- the WeatherAPI condition code is not one of the four base routine codes above and is not Mist, Fog, or Freezing fog.
 
-Hourly details can include time, condition, temperature, rain/snow chance, precipitation, and gusts when gust speed is at least 30 km/h. If no significant hours are found, the report explicitly says so.
+Mist/Fog/Freezing-fog hours are not significant solely because of that condition. If the same hour independently meets the rain, snow, or precipitation threshold, the hour remains in the report but its fog/mist condition label is omitted so useful precipitation timing is not lost. Hourly details can include time, condition (when not suppressed), temperature, rain/snow chance, precipitation, and gusts when gust speed is at least 30 km/h. If no significant hours are found, the report explicitly says so.
 
 The daily WeatherAPI condition image is passed to ntfy as both `icon` and external `attach` when WeatherAPI returns an icon URL.
 
@@ -200,11 +203,11 @@ Checkpoint date: **2026-09-25**.
 - five-minute schedule plus manual test trigger;
 - configuration loaded from `public.key_value_store`;
 - current WeatherAPI lookup for the configured coordinates;
-- routine-condition suppression for codes `1000`, `1003`, `1006`, and `1009`;
+- current-condition suppression for codes `1000`, `1003`, `1006`, `1009`, `1030` (Mist), `1135` (Fog), and `1147` (Freezing fog);
 - Redis active-condition suppression with 15-minute rolling TTL;
 - WeatherAPI failure notices routed to the infrastructure ntfy topic with the same rolling suppression pattern;
 - once-per-target-day next-day report at/after 23:00 local time;
-- hourly significant-weather extraction for the daily report;
+- hourly significant-weather extraction for the daily report, with fog/mist removed as standalone report reasons and all relevant forecast hours included;
 - WeatherAPI condition icons included in ntfy when available;
 - ntfy success required before writing condition/daily/error markers.
 
