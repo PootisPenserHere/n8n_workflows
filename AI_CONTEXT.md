@@ -795,3 +795,310 @@ The current scanner export has been statically syntax-checked and simulated with
 - The target n8n instance is currently 2.7.3. At that version the HTTP Request node does not have the required WebDAV methods in the workflow design, so CalDAV `PROPFIND`/`REPORT` operations remain in Code nodes using `this.helpers.httpRequest`.
 - DAV calls use full responses and `ignoreHttpStatusErrors: true` so Nextcloud/reverse-proxy error bodies can be surfaced with useful diagnostics.
 - In this n8n 2.7.3 task-runner environment, do not rely on the WHATWG global `URL` constructor inside Code nodes. Calendar discovery uses string-based HTTP(S) URL parsing/resolution so valid values such as `https://cloud.idle.laziness.rocks` work in the sandbox.
+
+## Weather notifications - WeatherAPI + ntfy
+
+### Current files
+
+- `workflows/weather-notifications/README.md`
+- `workflows/weather-notifications/Weather Notifications - WeatherAPI + ntfy.json`
+
+### Purpose
+
+The weather notification workflow polls WeatherAPI every five minutes, suppresses routine weather, deduplicates active adverse/weather-error notifications in Redis, publishes noteworthy conditions through ntfy, and sends one forecast for the next local day at/after 23:00.
+
+The workflow is intentionally self-contained. It does not call a sub-workflow. PostgreSQL supplies configuration, Redis supplies transient/idempotency state, and Code nodes perform WeatherAPI/ntfy HTTP requests.
+
+### Configuration contract
+
+The workflow reads these names from `public.key_value_store` through the existing `automation-db` PostgreSQL credential:
+
+```text
+WEATHERAPI_API_KEY
+SCHOOL_LATITUDE
+SCHOOL_LONGITUDE
+TIMEZONE
+NOTIFICATIONS_BASE_URL
+NOTIFICATIONS_WEATHER_TOPIC
+NOTIFICATIONS_INFRA_ISSUES_TOPIC
+NOTIFICATIONS_USER
+NOTIFICATIONS_PASSWORD
+```
+
+Required non-empty values:
+
+```text
+WEATHERAPI_API_KEY
+SCHOOL_LATITUDE
+SCHOOL_LONGITUDE
+TIMEZONE
+NOTIFICATIONS_BASE_URL
+NOTIFICATIONS_WEATHER_TOPIC
+NOTIFICATIONS_INFRA_ISSUES_TOPIC
+```
+
+`NOTIFICATIONS_USER` and `NOTIFICATIONS_PASSWORD` may both be empty. If either is set, both must be set.
+
+Validation contract:
+
+- latitude must be numeric and between -90 and 90;
+- longitude must be numeric and between -180 and 180;
+- `TIMEZONE` must be a valid IANA time-zone identifier accepted by `Intl.DateTimeFormat`;
+- `NOTIFICATIONS_BASE_URL` must be an absolute HTTP(S) URL;
+- the workflow strips trailing slashes from `NOTIFICATIONS_BASE_URL` before use.
+
+No WeatherAPI/ntfy secret belongs in the exported JSON as a literal. Values come from `public.key_value_store` at execution time.
+
+### n8n credential requirements
+
+The current export references:
+
+- PostgreSQL: `automation-db`
+- Redis: `Redis - shared`
+
+After import into a different n8n instance, reselect these credentials if the stored credential IDs are stale.
+
+WeatherAPI and ntfy calls are made from Code nodes using `this.helpers.httpRequest`, not n8n HTTP Request credentials. The ntfy Code nodes construct Basic auth from the key-value-store username/password only when both are configured.
+
+### Current-weather polling contract
+
+Default schedule:
+
+```text
+*/5 * * * *
+```
+
+WeatherAPI request:
+
+```text
+GET https://api.weatherapi.com/v1/current.json
+q=<SCHOOL_LATITUDE,SCHOOL_LONGITUDE>
+aqi=no
+```
+
+The request timeout is 20 seconds. Non-2xx responses, thrown transport errors, and successful responses missing `location`/`current.condition` are normalized as `success: false` instead of immediately throwing from the fetch Code node.
+
+The successful current-response path deletes any active current-endpoint error marker before classifying the condition.
+
+### Reportable-condition decision
+
+The canonical quiet/routine WeatherAPI condition-code set is:
+
+```text
+1000
+1003
+1006
+1009
+```
+
+These correspond to the normal clear/partly-cloudy/cloudy/overcast family represented by the WeatherAPI response used when this workflow was created. The implementation uses the numeric code set, not localized condition text.
+
+Current rule:
+
+```text
+reportable = numeric condition code AND code not in {1000,1003,1006,1009}
+```
+
+Do not silently broaden/narrow this set during maintenance. A classification change is a product-behavior change and must update both the workflow README and this AI context.
+
+### Active-condition Redis behavior
+
+Marker key:
+
+```text
+weather-notifier:active:v1:condition:<WeatherAPI condition code>
+```
+
+TTL:
+
+```text
+900 seconds (15 minutes)
+```
+
+Behavior:
+
+- reportable condition + no marker: send ntfy, then write marker only after a 2xx ntfy response;
+- same reportable condition + marker exists: do not notify, rewrite the marker with a fresh 15-minute TTL;
+- routine condition: no condition marker read/write and no weather notification;
+- when a condition is absent long enough for its marker to expire, a later recurrence may notify again.
+
+The rolling TTL is deliberate. With a five-minute poll interval, persistent weather remains suppressed as long as observations continue. The current design does not explicitly delete markers for reportable codes that are no longer current; natural TTL expiry provides the reset.
+
+### Current weather ntfy message contract
+
+Weather alerts use `NOTIFICATIONS_WEATHER_TOPIC` and currently send priority `4` with tags:
+
+```text
+warning
+umbrella
+```
+
+The title is:
+
+```text
+Weather alert: <WeatherAPI condition text>
+```
+
+The body may include condition, temperature/feels-like, precipitation, humidity, wind/gusts, visibility, and observation time when those fields exist.
+
+If WeatherAPI returns a condition icon, protocol-relative values such as `//cdn.weatherapi.com/...` are normalized to HTTPS. The normalized URL is sent to ntfy as both:
+
+```text
+icon
+attach
+```
+
+with filename `weather-condition.png` for the current-condition message.
+
+### WeatherAPI failure notification contract
+
+Current endpoint failure marker:
+
+```text
+weather-notifier:active:v1:api-error:current
+```
+
+Forecast endpoint failure marker:
+
+```text
+weather-notifier:active:v1:api-error:forecast
+```
+
+TTL for both:
+
+```text
+900 seconds (15 minutes)
+```
+
+A new endpoint failure sends an ntfy message to `NOTIFICATIONS_INFRA_ISSUES_TOPIC`. A repeated failure while the marker exists does not send again; it refreshes the marker TTL. A later successful WeatherAPI call deletes the endpoint's active error marker.
+
+Infrastructure failure messages currently use priority `4` and tags `warning`, `cloud`.
+
+This failure suppression is endpoint-specific rather than status-code-specific: a continuing current-weather outage stays one active current error even if the exact HTTP error changes during the 15-minute rolling window.
+
+### Daily next-day forecast contract
+
+The five-minute execution always computes local date/hour from `TIMEZONE`. The daily branch is due when:
+
+```text
+local hour >= 23
+```
+
+This is intentionally an at-or-after test rather than an exact 23:00 minute check. If the 23:00 execution is missed but the workflow runs later before local midnight, the report can still be sent.
+
+Target date is the next local calendar date computed from the current local date.
+
+Daily sent marker:
+
+```text
+weather-notifier:sent:v1:daily:<target YYYY-MM-DD>
+```
+
+TTL:
+
+```text
+259200 seconds (3 days)
+```
+
+The marker is keyed by the day being forecast. The workflow checks it before making the forecast request and writes it only after a successful ntfy response.
+
+WeatherAPI request:
+
+```text
+GET https://api.weatherapi.com/v1/forecast.json
+q=<SCHOOL_LATITUDE,SCHOOL_LONGITUDE>
+days=2
+aqi=no
+alerts=no
+```
+
+The request timeout is 20 seconds. The workflow prefers the `forecastday` whose `date` exactly matches the computed target date, then falls back to the second returned day, then the first.
+
+### Daily report formatting
+
+The daily report uses `NOTIFICATIONS_WEATHER_TOPIC`, priority `3`, and tags:
+
+```text
+weather
+calendar
+```
+
+Title:
+
+```text
+Tomorrow's weather — <YYYY-MM-DD>
+```
+
+The summary includes available daily condition, min/max/average Celsius temperature, rain chance/total precipitation, snow chance, max wind, and average humidity.
+
+Hourly periods are considered significant when at least one is true:
+
+```text
+chance_of_rain >= 30
+chance_of_snow >= 20
+precip_mm > 0
+condition code not in {1000,1003,1006,1009}
+```
+
+At most 12 significant hours are rendered individually. If more are found, the message adds a count of the remaining significant hours. If none are found, the report explicitly states that no significant rain, snow, or adverse hourly conditions are expected.
+
+Hourly lines can include hour, condition, temperature, rain/snow probability, precipitation, and gust speed when `gust_kph >= 30`.
+
+The daily condition image is normalized in the same way as current conditions and sent as ntfy `icon` + `attach` with filename `weather-forecast.png` when present.
+
+### ntfy HTTP contract
+
+The workflow sends JSON with HTTP `POST` to `NOTIFICATIONS_BASE_URL`. The topic is included in the JSON body; the configured base URL is not automatically rewritten to append a topic path.
+
+Common JSON fields used by the workflow are:
+
+```text
+topic
+title
+message
+priority
+tags
+icon       (optional)
+attach     (optional)
+filename   (optional)
+markdown   (optional, supported by common sender helper but not currently used by weather messages)
+```
+
+If username/password are configured, the workflow sends HTTP Basic authorization using a `Buffer`-generated base64 credential string. The request timeout is 20 seconds. Only HTTP 2xx is considered successful.
+
+Redis markers that represent successful notification delivery are written only after ntfy succeeds. This is required for retryability.
+
+### Operational boundary / known behavior
+
+- The current workflow does not use an atomic Redis delivery claim before ntfy sends. Duplicate prevention is marker-based; overlapping executions in the narrow interval before the first successful send writes its marker could theoretically duplicate a notification. The normal five-minute cadence makes overlap unlikely, but future hardening may adopt the calendar workflow's short atomic-claim pattern.
+- Active adverse-condition markers are per WeatherAPI numeric condition code. A transition from one reportable code to another can generate a new alert even if both describe related weather.
+- The workflow does not proactively send an "all clear" notification when a reportable condition ends.
+- The daily report only tries while local hour is >=23 for the current date. If n8n is down across local midnight, the previous day's unsent target-date report is not backfilled after midnight.
+- Configuration validation errors currently throw from `Format & Validate Config`; they do not pass through the WeatherAPI infrastructure-error ntfy path.
+
+### Validation notes
+
+Checkpoint date: **2026-09-25**.
+
+The canonical export was reviewed for:
+
+- five-minute schedule and manual trigger;
+- key-value-store configuration lookup and validation;
+- WeatherAPI current/forecast request shape;
+- quiet-code classification;
+- 15-minute rolling current-condition/error markers;
+- target-date daily marker with 3-day TTL;
+- marker writes gated behind successful ntfy sends;
+- Redis credential references using `Redis - shared`;
+- PostgreSQL credential reference using `automation-db`.
+
+Runtime behavior still depends on the local n8n instance, credentials, database contents, Redis, WeatherAPI availability/account limits, and ntfy server configuration.
+
+### Maintenance rule
+
+Any change to scheduling, condition classification, Redis key namespaces/TTLs, WeatherAPI request shape, notification topics/authentication, daily significance thresholds, or delivery idempotency is a contract change. Update both:
+
+- `workflows/weather-notifications/README.md`
+- this `AI_CONTEXT.md` weather section
+
+Do not create a workflow-local AI context file; the root `AI_CONTEXT.md` remains the repository-wide AI context source.

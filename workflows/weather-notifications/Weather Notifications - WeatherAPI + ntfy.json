@@ -1,0 +1,1364 @@
+{
+  "name": "Weather Notifications - WeatherAPI + ntfy",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "d0dbb50f-5050-4662-9652-403e960cfee5",
+      "name": "Schedule - Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2688,
+        608
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5f73fdcb-74a3-44ac-81a1-b633f1ca4718",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2688,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT name, data FROM public.key_value_store WHERE name IN ('WEATHERAPI_API_KEY', 'SCHOOL_LATITUDE', 'SCHOOL_LONGITUDE', 'TIMEZONE', 'NOTIFICATIONS_USER', 'NOTIFICATIONS_PASSWORD', 'NOTIFICATIONS_BASE_URL', 'NOTIFICATIONS_WEATHER_TOPIC', 'NOTIFICATIONS_INFRA_ISSUES_TOPIC')",
+        "options": {}
+      },
+      "id": "3981711f-ccb3-4626-99d4-9cf782cfd2dc",
+      "name": "Get Weather Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -2448,
+        688
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "BBQFauX6oeEEOint",
+          "name": "automation-db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((item) => item.json || {});\nconst values = {};\nfor (const row of rows) {\n  if (typeof row.name === 'string') values[row.name] = row.data;\n}\n\nconst required = [\n  'WEATHERAPI_API_KEY',\n  'SCHOOL_LATITUDE',\n  'SCHOOL_LONGITUDE',\n  'TIMEZONE',\n  'NOTIFICATIONS_BASE_URL',\n  'NOTIFICATIONS_WEATHER_TOPIC',\n  'NOTIFICATIONS_INFRA_ISSUES_TOPIC',\n];\nconst missing = required.filter((key) => values[key] === undefined || values[key] === null || String(values[key]).trim() === '');\nif (missing.length) throw new Error(`Missing required public.key_value_store keys: ${missing.join(', ')}`);\n\nconst apiKey = String(values.WEATHERAPI_API_KEY).trim();\nconst latitude = Number(values.SCHOOL_LATITUDE);\nconst longitude = Number(values.SCHOOL_LONGITUDE);\nconst timezone = String(values.TIMEZONE).trim();\nconst notificationsBaseUrl = String(values.NOTIFICATIONS_BASE_URL).trim().replace(/\\/+$/, '');\nconst notificationsUser = String(values.NOTIFICATIONS_USER ?? '').trim();\nconst notificationsPassword = String(values.NOTIFICATIONS_PASSWORD ?? '');\nconst weatherTopic = String(values.NOTIFICATIONS_WEATHER_TOPIC).trim();\nconst infraTopic = String(values.NOTIFICATIONS_INFRA_ISSUES_TOPIC).trim();\n\nif (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) throw new Error('Configured latitude is invalid');\nif (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) throw new Error('Configured longitude is invalid');\nif (!/^https?:\\/\\/[^\\s/]+(?:\\/.*)?$/i.test(notificationsBaseUrl)) throw new Error('NOTIFICATIONS_BASE_URL must be an absolute HTTP(S) URL');\nif ((notificationsUser && !notificationsPassword) || (!notificationsUser && notificationsPassword)) {\n  throw new Error('NOTIFICATIONS_USER and NOTIFICATIONS_PASSWORD must either both be configured or both be empty');\n}\ntry { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); }\ncatch { throw new Error(`TIMEZONE is not a valid IANA time zone: ${timezone}`); }\n\nconst localParts = Object.fromEntries(\n  new Intl.DateTimeFormat('en-CA', {\n    timeZone: timezone,\n    year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',\n  }).formatToParts(new Date()).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value])\n);\nconst localDate = `${localParts.year}-${localParts.month}-${localParts.day}`;\nconst tomorrowDate = (() => {\n  const d = new Date(Date.UTC(Number(localParts.year), Number(localParts.month) - 1, Number(localParts.day) + 1));\n  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;\n})();\n\nreturn [{ json: {\n  weatherApi: {\n    apiKey,\n    query: `${latitude},${longitude}`,\n    baseUrl: 'https://api.weatherapi.com/v1',\n  },\n  notifications: {\n    baseUrl: notificationsBaseUrl,\n    user: notificationsUser,\n    password: notificationsPassword,\n    weatherTopic,\n    infraTopic,\n  },\n  timezone,\n  current: {\n    conditionTtlSeconds: 15 * 60,\n    apiErrorMarkerKey: 'weather-notifier:active:v1:api-error:current',\n    apiErrorTtlSeconds: 15 * 60,\n  },\n  daily: {\n    dueNow: Number(localParts.hour) >= 23,\n    targetDate: tomorrowDate,\n    markerKey: `weather-notifier:sent:v1:daily:${tomorrowDate}`,\n    markerTtlSeconds: 3 * 24 * 60 * 60,\n    apiErrorMarkerKey: 'weather-notifier:active:v1:api-error:forecast',\n    apiErrorTtlSeconds: 15 * 60,\n  },\n  local: {\n    date: localDate,\n    hour: Number(localParts.hour),\n    minute: Number(localParts.minute),\n  },\n} }];"
+      },
+      "id": "82de098c-f892-487c-96b1-551a7541b0f8",
+      "name": "Format & Validate Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst startedAt = new Date().toISOString();\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `${cfg.weatherApi.baseUrl}/current.json`,\n    qs: { key: cfg.weatherApi.apiKey, q: cfg.weatherApi.query, aqi: 'no' },\n    json: true,\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  let body = res?.body;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch { body = null; }\n  }\n  if (statusCode < 200 || statusCode >= 300) {\n    return [{ json: { success: false, endpoint: 'current', statusCode, error: body?.error?.message || `WeatherAPI returned HTTP ${statusCode || 'unknown'}`, startedAt } }];\n  }\n  if (!body?.current?.condition || !body?.location) {\n    return [{ json: { success: false, endpoint: 'current', statusCode, error: 'WeatherAPI current response was missing expected fields', startedAt } }];\n  }\n  return [{ json: { success: true, endpoint: 'current', statusCode, data: body, startedAt } }];\n} catch (error) {\n  return [{ json: { success: false, endpoint: 'current', statusCode: null, error: error?.message || String(error), startedAt } }];\n}"
+      },
+      "id": "e0e82419-05d2-4504-bcb9-86535801256d",
+      "name": "Fetch Current Weather",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1920,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "531f0654-90d5-4363-9593-cf4321907745",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6bbe7b51-5dd0-41b8-a8d3-14a06d3f4bf1",
+      "name": "Current API OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1680,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "={{ $('Format & Validate Config').first().json.current.apiErrorMarkerKey }}"
+      },
+      "id": "653c25d6-e117-49c6-918d-4005f894c6cd",
+      "name": "Clear Current API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1440,
+        240
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst fetched = $('Fetch Current Weather').first().json;\nconst current = fetched.data.current || {};\nconst condition = current.condition || {};\nconst code = Number(condition.code);\nconst quietCodes = new Set([1000, 1003, 1006, 1009]);\nconst reportable = Number.isFinite(code) && !quietCodes.has(code);\nconst iconRaw = String(condition.icon || '').trim();\nconst iconUrl = iconRaw.startsWith('//') ? `https:${iconRaw}` : iconRaw;\nconst observedAt = current.last_updated || fetched.data.location?.localtime || null;\nconst key = `weather-notifier:active:v1:condition:${Number.isFinite(code) ? code : 'unknown'}`;\nconst details = [\n  `Condition: ${condition.text || 'Unknown'}`,\n  Number.isFinite(Number(current.temp_c)) ? `Temperature: ${Number(current.temp_c).toFixed(1)}°C${Number.isFinite(Number(current.feelslike_c)) ? ` (feels like ${Number(current.feelslike_c).toFixed(1)}°C)` : ''}` : null,\n  Number.isFinite(Number(current.precip_mm)) ? `Precipitation: ${Number(current.precip_mm).toFixed(1)} mm` : null,\n  Number.isFinite(Number(current.humidity)) ? `Humidity: ${Math.round(Number(current.humidity))}%` : null,\n  Number.isFinite(Number(current.wind_kph)) ? `Wind: ${Number(current.wind_kph).toFixed(0)} km/h${current.wind_dir ? ` ${current.wind_dir}` : ''}${Number.isFinite(Number(current.gust_kph)) ? `, gusts ${Number(current.gust_kph).toFixed(0)} km/h` : ''}` : null,\n  Number.isFinite(Number(current.vis_km)) ? `Visibility: ${Number(current.vis_km).toFixed(1)} km` : null,\n  observedAt ? `Observed: ${observedAt}` : null,\n].filter(Boolean);\n\nreturn [{ json: {\n  reportable,\n  conditionCode: code,\n  conditionText: condition.text || 'Unknown weather condition',\n  markerKey: key,\n  markerValue: JSON.stringify({ code, condition: condition.text || null, lastObservedAt: observedAt, refreshedAt: new Date().toISOString() }),\n  ttlSeconds: cfg.current.conditionTtlSeconds,\n  notification: {\n    topic: cfg.notifications.weatherTopic,\n    title: `Weather alert: ${condition.text || 'Adverse conditions'}`,\n    message: details.join('\\n'),\n    priority: 4,\n    tags: ['warning', 'umbrella'],\n    icon: iconUrl || null,\n    attach: iconUrl || null,\n    filename: iconUrl ? 'weather-condition.png' : null,\n  },\n} }];"
+      },
+      "id": "194f6111-beb8-4092-8cf1-c343692f3840",
+      "name": "Classify Current Conditions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ef6cb964-5da5-46fa-b261-dfd7f3344228",
+              "leftValue": "={{ $json.reportable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "be487267-3027-45dc-9022-fb7261b7129f",
+      "name": "Current Conditions Reportable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -960,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "reportedRaw",
+        "key": "={{ $json.markerKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "4f65443a-17a7-472b-abce-123bc58d2ba8",
+      "name": "Get Current Condition Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        128
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const classified = $('Classify Current Conditions').first().json;\nconst raw = $input.first().json.reportedRaw;\nconst alreadyReported = raw !== null && raw !== undefined && raw !== '';\nreturn [{ json: { ...classified, alreadyReported } }];"
+      },
+      "id": "13948176-fb50-45b3-8fd8-ffb2753492a4",
+      "name": "Prepare Current Alert State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0cdb365e-c730-4315-91f5-54d9d9382e00",
+              "leftValue": "={{ $json.alreadyReported }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9a0d3597-2b45-45ab-8470-6404caf78d33",
+      "name": "Current Condition Already Reported?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "a7fe4478-c6d6-4904-8099-48211d993a9f",
+      "name": "Refresh Current Condition TTL",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst candidate = $input.first().json || {};\nconst n = candidate.notification || {};\nconst body = {\n  topic: String(n.topic || ''),\n  title: String(n.title || 'Weather notification'),\n  message: String(n.message || ''),\n  priority: Number(n.priority || 3),\n  tags: Array.isArray(n.tags) ? n.tags : ['weather'],\n};\nif (n.icon) body.icon = String(n.icon);\nif (n.attach) body.attach = String(n.attach);\nif (n.filename) body.filename = String(n.filename);\nif (n.markdown) body.markdown = true;\nconst headers = { 'Content-Type': 'application/json; charset=utf-8' };\nif (cfg.notifications.user && cfg.notifications.password) {\n  headers.Authorization = `Basic ${Buffer.from(`${cfg.notifications.user}:${cfg.notifications.password}`, 'utf8').toString('base64')}`;\n}\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: cfg.notifications.baseUrl,\n    headers,\n    body: JSON.stringify(body),\n    encoding: 'text',\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  const success = statusCode >= 200 && statusCode < 300;\n  return [{ json: { ...candidate, success, statusCode, deliveryError: success ? null : `ntfy returned HTTP ${statusCode || 'unknown'}` } }];\n} catch (error) {\n  return [{ json: { ...candidate, success: false, statusCode: null, deliveryError: error?.message || String(error) } }];\n}"
+      },
+      "id": "d92b03a8-99bb-468a-a841-cfa37dda4b64",
+      "name": "Send Current Weather ntfy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ccd27987-d2e0-45d6-87ee-dd9088acbf86",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2092e047-1ed1-4d1b-82f7-c5409944fb32",
+      "name": "Current Weather Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "0e4572d6-f959-41b4-a81e-6bbd49a0f789",
+      "name": "Write Current Condition Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        480,
+        160
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "errorMarkerRaw",
+        "key": "={{ $('Format & Validate Config').first().json.current.apiErrorMarkerKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "00b3c549-15aa-4731-989c-247dd3f99779",
+      "name": "Get Current API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1440,
+        480
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst fetched = $('Fetch Current Weather').first().json;\nconst raw = $input.first().json.errorMarkerRaw;\nconst alreadyReported = raw !== null && raw !== undefined && raw !== '';\nconst markerValue = JSON.stringify({ endpoint: 'current', lastFailureAt: new Date().toISOString(), statusCode: fetched.statusCode || null });\nreturn [{ json: {\n  alreadyReported,\n  markerKey: cfg.current.apiErrorMarkerKey,\n  markerValue,\n  ttlSeconds: cfg.current.apiErrorTtlSeconds,\n  notification: {\n    topic: cfg.notifications.infraTopic,\n    title: 'WeatherAPI current request failed',\n    message: `The weather current-conditions request failed${fetched.statusCode ? ` with HTTP ${fetched.statusCode}` : ''}. ${String(fetched.error || 'Unknown error').slice(0, 600)}`,\n    priority: 4,\n    tags: ['warning', 'cloud'],\n  },\n} }];"
+      },
+      "id": "0c8f8d27-1d6b-4a16-b3fa-02ac8bdb0052",
+      "name": "Prepare Current API Error Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "881a6588-a56c-4ea0-b8fd-f48e66092152",
+              "leftValue": "={{ $json.alreadyReported }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d00ba6df-d0f9-41a5-bd37-764046dcf8bd",
+      "name": "Current API Error Already Reported?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -960,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "1241eb39-ef40-49d5-8fbb-b0cd46cff19b",
+      "name": "Refresh Current API Error TTL",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        592
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst candidate = $input.first().json || {};\nconst n = candidate.notification || {};\nconst body = {\n  topic: String(n.topic || ''),\n  title: String(n.title || 'Weather notification'),\n  message: String(n.message || ''),\n  priority: Number(n.priority || 3),\n  tags: Array.isArray(n.tags) ? n.tags : ['weather'],\n};\nif (n.icon) body.icon = String(n.icon);\nif (n.attach) body.attach = String(n.attach);\nif (n.filename) body.filename = String(n.filename);\nif (n.markdown) body.markdown = true;\nconst headers = { 'Content-Type': 'application/json; charset=utf-8' };\nif (cfg.notifications.user && cfg.notifications.password) {\n  headers.Authorization = `Basic ${Buffer.from(`${cfg.notifications.user}:${cfg.notifications.password}`, 'utf8').toString('base64')}`;\n}\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: cfg.notifications.baseUrl,\n    headers,\n    body: JSON.stringify(body),\n    encoding: 'text',\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  const success = statusCode >= 200 && statusCode < 300;\n  return [{ json: { ...candidate, success, statusCode, deliveryError: success ? null : `ntfy returned HTTP ${statusCode || 'unknown'}` } }];\n} catch (error) {\n  return [{ json: { ...candidate, success: false, statusCode: null, deliveryError: error?.message || String(error) } }];\n}"
+      },
+      "id": "35c8018b-46cc-4e7e-86f7-e2a213eea075",
+      "name": "Send Current API Error ntfy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c31ccd0a-9310-43b8-87d4-530117ba0c8e",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f537bf0f-d1d8-4142-a586-94bbd1917b78",
+      "name": "Current API Error Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -480,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "3518ecff-7fb7-4f8b-9cf8-2185a2eb46ac",
+      "name": "Write Current API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        432
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d9bcb25b-a083-4df3-8f0b-3642644c72e7",
+              "leftValue": "={{ $('Format & Validate Config').first().json.daily.dueNow }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "68ff4339-1d09-4b60-951c-0161e335df8a",
+      "name": "Daily Report Due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1920,
+        1008
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "dailyMarkerRaw",
+        "key": "={{ $('Format & Validate Config').first().json.daily.markerKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "9792549b-4def-4f16-b412-3dc2af693cef",
+      "name": "Get Daily Report Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -1680,
+        960
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.dailyMarkerRaw;\nreturn [{ json: { alreadySent: raw !== null && raw !== undefined && raw !== '' } }];"
+      },
+      "id": "4df21ddc-677b-488e-82c2-a4d1f8b96e6d",
+      "name": "Check Daily Report Marker",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        960
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3f5b00d2-837e-47f0-9aac-85f19e41eb33",
+              "leftValue": "={{ $json.alreadySent }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dc7dc610-4962-4acf-9f21-a8253cd884b6",
+      "name": "Daily Report Already Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1200,
+        960
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst startedAt = new Date().toISOString();\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `${cfg.weatherApi.baseUrl}/forecast.json`,\n    qs: { key: cfg.weatherApi.apiKey, q: cfg.weatherApi.query, days: 2, aqi: 'no', alerts: 'no' },\n    json: true,\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  let body = res?.body;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch { body = null; }\n  }\n  if (statusCode < 200 || statusCode >= 300) {\n    return [{ json: { success: false, endpoint: 'forecast', statusCode, error: body?.error?.message || `WeatherAPI returned HTTP ${statusCode || 'unknown'}`, startedAt } }];\n  }\n  const forecastDays = body?.forecast?.forecastday;\n  if (!Array.isArray(forecastDays) || forecastDays.length < 1) {\n    return [{ json: { success: false, endpoint: 'forecast', statusCode, error: 'WeatherAPI forecast response was missing forecast days', startedAt } }];\n  }\n  return [{ json: { success: true, endpoint: 'forecast', statusCode, data: body, startedAt } }];\n} catch (error) {\n  return [{ json: { success: false, endpoint: 'forecast', statusCode: null, error: error?.message || String(error), startedAt } }];\n}"
+      },
+      "id": "4317ab83-9b7b-471c-90c5-fda93bd8c693",
+      "name": "Fetch Tomorrow Forecast",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "22ca5c1d-c086-4e41-ab68-d19e1ade9df2",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "501eec1b-cd58-4dc8-818e-9a373f32ff35",
+      "name": "Forecast API OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -720,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "={{ $('Format & Validate Config').first().json.daily.apiErrorMarkerKey }}"
+      },
+      "id": "71c52e4f-9313-49c4-a260-732a2d5a23a4",
+      "name": "Clear Forecast API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        928
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst fetched = $('Fetch Tomorrow Forecast').first().json;\nconst days = fetched.data.forecast?.forecastday || [];\nconst forecast = days.find((d) => String(d.date) === cfg.daily.targetDate) || days[1] || days[0];\nif (!forecast?.day) throw new Error(`Forecast for ${cfg.daily.targetDate} was not present in WeatherAPI response`);\nconst day = forecast.day;\nconst quietCodes = new Set([1000, 1003, 1006, 1009]);\nconst hours = Array.isArray(forecast.hour) ? forecast.hour : [];\nconst significant = hours.filter((h) => {\n  const code = Number(h?.condition?.code);\n  const rain = Number(h?.chance_of_rain || 0);\n  const snow = Number(h?.chance_of_snow || 0);\n  const precip = Number(h?.precip_mm || 0);\n  return rain >= 30 || snow >= 20 || precip > 0 || (Number.isFinite(code) && !quietCodes.has(code));\n});\nconst hourLines = significant.slice(0, 12).map((h) => {\n  const time = String(h.time || '').split(' ')[1] || String(h.time || '');\n  const bits = [\n    `${time} — ${h.condition?.text || 'Weather'}`,\n    Number.isFinite(Number(h.temp_c)) ? `${Number(h.temp_c).toFixed(0)}°C` : null,\n    Number(h.chance_of_rain || 0) > 0 ? `rain ${Math.round(Number(h.chance_of_rain))}%` : null,\n    Number(h.chance_of_snow || 0) > 0 ? `snow ${Math.round(Number(h.chance_of_snow))}%` : null,\n    Number(h.precip_mm || 0) > 0 ? `${Number(h.precip_mm).toFixed(1)} mm` : null,\n    Number(h.gust_kph || 0) >= 30 ? `gusts ${Number(h.gust_kph).toFixed(0)} km/h` : null,\n  ].filter(Boolean);\n  return bits.join(' · ');\n});\nif (significant.length > 12) hourLines.push(`…plus ${significant.length - 12} more significant forecast hour(s).`);\nif (!hourLines.length) hourLines.push('No significant rain, snow, or adverse hourly conditions are expected.');\n\nconst iconRaw = String(day.condition?.icon || '').trim();\nconst iconUrl = iconRaw.startsWith('//') ? `https:${iconRaw}` : iconRaw;\nconst summary = [\n  `Forecast for ${forecast.date}: ${day.condition?.text || 'Unknown'}`,\n  Number.isFinite(Number(day.mintemp_c)) && Number.isFinite(Number(day.maxtemp_c)) ? `Temperature: ${Number(day.mintemp_c).toFixed(0)}–${Number(day.maxtemp_c).toFixed(0)}°C (avg ${Number(day.avgtemp_c || 0).toFixed(0)}°C)` : null,\n  `Rain chance: ${Math.round(Number(day.daily_chance_of_rain || 0))}%${Number(day.totalprecip_mm || 0) > 0 ? ` · total precip ${Number(day.totalprecip_mm).toFixed(1)} mm` : ''}`,\n  Number(day.daily_chance_of_snow || 0) > 0 ? `Snow chance: ${Math.round(Number(day.daily_chance_of_snow))}%` : null,\n  Number.isFinite(Number(day.maxwind_kph)) ? `Max wind: ${Number(day.maxwind_kph).toFixed(0)} km/h` : null,\n  Number.isFinite(Number(day.avghumidity)) ? `Average humidity: ${Math.round(Number(day.avghumidity))}%` : null,\n  '',\n  'Significant hours:',\n  ...hourLines,\n].filter((v) => v !== null);\n\nreturn [{ json: {\n  markerKey: cfg.daily.markerKey,\n  markerValue: JSON.stringify({ targetDate: cfg.daily.targetDate, sentAt: new Date().toISOString() }),\n  ttlSeconds: cfg.daily.markerTtlSeconds,\n  notification: {\n    topic: cfg.notifications.weatherTopic,\n    title: `Tomorrow's weather — ${forecast.date}`,\n    message: summary.join('\\n'),\n    priority: 3,\n    tags: ['weather', 'calendar'],\n    icon: iconUrl || null,\n    attach: iconUrl || null,\n    filename: iconUrl ? 'weather-forecast.png' : null,\n  },\n} }];"
+      },
+      "id": "32a21919-423a-4508-b10a-9b10d38f950c",
+      "name": "Build Daily Forecast Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst candidate = $input.first().json || {};\nconst n = candidate.notification || {};\nconst body = {\n  topic: String(n.topic || ''),\n  title: String(n.title || 'Weather notification'),\n  message: String(n.message || ''),\n  priority: Number(n.priority || 3),\n  tags: Array.isArray(n.tags) ? n.tags : ['weather'],\n};\nif (n.icon) body.icon = String(n.icon);\nif (n.attach) body.attach = String(n.attach);\nif (n.filename) body.filename = String(n.filename);\nif (n.markdown) body.markdown = true;\nconst headers = { 'Content-Type': 'application/json; charset=utf-8' };\nif (cfg.notifications.user && cfg.notifications.password) {\n  headers.Authorization = `Basic ${Buffer.from(`${cfg.notifications.user}:${cfg.notifications.password}`, 'utf8').toString('base64')}`;\n}\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: cfg.notifications.baseUrl,\n    headers,\n    body: JSON.stringify(body),\n    encoding: 'text',\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  const success = statusCode >= 200 && statusCode < 300;\n  return [{ json: { ...candidate, success, statusCode, deliveryError: success ? null : `ntfy returned HTTP ${statusCode || 'unknown'}` } }];\n} catch (error) {\n  return [{ json: { ...candidate, success: false, statusCode: null, deliveryError: error?.message || String(error) } }];\n}"
+      },
+      "id": "8327b891-d1c1-4177-8244-91a0fb45c55d",
+      "name": "Send Daily Weather ntfy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "033a7a4b-f05e-4149-a127-1a85ff107dda",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8605dc37-a5ba-4cc8-b368-61b4cf76c367",
+      "name": "Daily Weather Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "b885413f-dea2-4b81-8426-78e34d418a6d",
+      "name": "Write Daily Report Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        480,
+        928
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "errorMarkerRaw",
+        "key": "={{ $('Format & Validate Config').first().json.daily.apiErrorMarkerKey }}",
+        "keyType": "string",
+        "options": {}
+      },
+      "id": "aa0dccb1-f93b-44d9-a142-2d1d8c0128b6",
+      "name": "Get Forecast API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        1168
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst fetched = $('Fetch Tomorrow Forecast').first().json;\nconst raw = $input.first().json.errorMarkerRaw;\nconst alreadyReported = raw !== null && raw !== undefined && raw !== '';\nconst markerValue = JSON.stringify({ endpoint: 'forecast', lastFailureAt: new Date().toISOString(), statusCode: fetched.statusCode || null });\nreturn [{ json: {\n  alreadyReported,\n  markerKey: cfg.daily.apiErrorMarkerKey,\n  markerValue,\n  ttlSeconds: cfg.daily.apiErrorTtlSeconds,\n  notification: {\n    topic: cfg.notifications.infraTopic,\n    title: 'WeatherAPI forecast request failed',\n    message: `The weather forecast request failed${fetched.statusCode ? ` with HTTP ${fetched.statusCode}` : ''}. ${String(fetched.error || 'Unknown error').slice(0, 600)}`,\n    priority: 4,\n    tags: ['warning', 'cloud'],\n  },\n} }];"
+      },
+      "id": "66fdccd2-d909-4d36-b096-5bb514ec1ac9",
+      "name": "Prepare Forecast API Error Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1d1d8f10-1933-4d0f-aa84-043bf280544d",
+              "leftValue": "={{ $json.alreadyReported }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a480aff8-41ad-4e15-a6ae-7618006c0636",
+      "name": "Forecast API Error Already Reported?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "e5adddff-64e6-4a25-883b-c3cc2bb30bd8",
+      "name": "Refresh Forecast API Error TTL",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        240,
+        1280
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Format & Validate Config').first().json;\nconst candidate = $input.first().json || {};\nconst n = candidate.notification || {};\nconst body = {\n  topic: String(n.topic || ''),\n  title: String(n.title || 'Weather notification'),\n  message: String(n.message || ''),\n  priority: Number(n.priority || 3),\n  tags: Array.isArray(n.tags) ? n.tags : ['weather'],\n};\nif (n.icon) body.icon = String(n.icon);\nif (n.attach) body.attach = String(n.attach);\nif (n.filename) body.filename = String(n.filename);\nif (n.markdown) body.markdown = true;\nconst headers = { 'Content-Type': 'application/json; charset=utf-8' };\nif (cfg.notifications.user && cfg.notifications.password) {\n  headers.Authorization = `Basic ${Buffer.from(`${cfg.notifications.user}:${cfg.notifications.password}`, 'utf8').toString('base64')}`;\n}\ntry {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: cfg.notifications.baseUrl,\n    headers,\n    body: JSON.stringify(body),\n    encoding: 'text',\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  const statusCode = Number(res?.statusCode || 0);\n  const success = statusCode >= 200 && statusCode < 300;\n  return [{ json: { ...candidate, success, statusCode, deliveryError: success ? null : `ntfy returned HTTP ${statusCode || 'unknown'}` } }];\n} catch (error) {\n  return [{ json: { ...candidate, success: false, statusCode: null, deliveryError: error?.message || String(error) } }];\n}"
+      },
+      "id": "3d94d7f1-2196-47fa-8942-68b0ae29ab94",
+      "name": "Send Forecast API Error ntfy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        1120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ccfe3d25-941f-4ed9-a24b-3644dd07f87c",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "148e1adc-a71c-41bf-9c15-487397dad62d",
+      "name": "Forecast API Error Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        1120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.markerKey }}",
+        "value": "={{ $json.markerValue }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": "={{ $json.ttlSeconds }}"
+      },
+      "id": "6d190806-8359-4395-8346-b884aa23b27e",
+      "name": "Write Forecast API Error Marker",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        720,
+        1120
+      ],
+      "credentials": {
+        "redis": {
+          "id": "vC5Hk0ioejfYS7u3",
+          "name": "Redis - shared"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule - Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Weather Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Get Weather Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Weather Config": {
+      "main": [
+        [
+          {
+            "node": "Format & Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format & Validate Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Current Weather",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Daily Report Due?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current API OK?": {
+      "main": [
+        [
+          {
+            "node": "Clear Current API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Current API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Current Weather": {
+      "main": [
+        [
+          {
+            "node": "Current API OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Current API Error Marker": {
+      "main": [
+        [
+          {
+            "node": "Classify Current Conditions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Current Conditions": {
+      "main": [
+        [
+          {
+            "node": "Current Conditions Reportable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current Conditions Reportable?": {
+      "main": [
+        [
+          {
+            "node": "Get Current Condition Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Condition Marker": {
+      "main": [
+        [
+          {
+            "node": "Prepare Current Alert State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Current Alert State": {
+      "main": [
+        [
+          {
+            "node": "Current Condition Already Reported?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current Condition Already Reported?": {
+      "main": [
+        [
+          {
+            "node": "Refresh Current Condition TTL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Current Weather ntfy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Current Weather ntfy": {
+      "main": [
+        [
+          {
+            "node": "Current Weather Sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current Weather Sent?": {
+      "main": [
+        [
+          {
+            "node": "Write Current Condition Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current API Error Marker": {
+      "main": [
+        [
+          {
+            "node": "Prepare Current API Error Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Current API Error Notice": {
+      "main": [
+        [
+          {
+            "node": "Current API Error Already Reported?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current API Error Already Reported?": {
+      "main": [
+        [
+          {
+            "node": "Refresh Current API Error TTL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Current API Error ntfy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Current API Error ntfy": {
+      "main": [
+        [
+          {
+            "node": "Current API Error Sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current API Error Sent?": {
+      "main": [
+        [
+          {
+            "node": "Write Current API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Report Due?": {
+      "main": [
+        [
+          {
+            "node": "Get Daily Report Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Daily Report Marker": {
+      "main": [
+        [
+          {
+            "node": "Check Daily Report Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Daily Report Marker": {
+      "main": [
+        [
+          {
+            "node": "Daily Report Already Sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Report Already Sent?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fetch Tomorrow Forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Tomorrow Forecast": {
+      "main": [
+        [
+          {
+            "node": "Forecast API OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forecast API OK?": {
+      "main": [
+        [
+          {
+            "node": "Clear Forecast API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Forecast API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Forecast API Error Marker": {
+      "main": [
+        [
+          {
+            "node": "Build Daily Forecast Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Daily Forecast Report": {
+      "main": [
+        [
+          {
+            "node": "Send Daily Weather ntfy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Daily Weather ntfy": {
+      "main": [
+        [
+          {
+            "node": "Daily Weather Sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Weather Sent?": {
+      "main": [
+        [
+          {
+            "node": "Write Daily Report Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Forecast API Error Marker": {
+      "main": [
+        [
+          {
+            "node": "Prepare Forecast API Error Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Forecast API Error Notice": {
+      "main": [
+        [
+          {
+            "node": "Forecast API Error Already Reported?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forecast API Error Already Reported?": {
+      "main": [
+        [
+          {
+            "node": "Refresh Forecast API Error TTL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Forecast API Error ntfy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Forecast API Error ntfy": {
+      "main": [
+        [
+          {
+            "node": "Forecast API Error Sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forecast API Error Sent?": {
+      "main": [
+        [
+          {
+            "node": "Write Forecast API Error Marker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "085ea860-5994-4da6-95ce-ff45a3e864fb",
+  "meta": {
+    "instanceId": "d1c4ccf66a09f4410effe2c9a613e63c898b8820cf6eff79e5e5a08d9cbf106c"
+  },
+  "id": "yc1xb0zgnPc6Dyyy",
+  "tags": []
+}
