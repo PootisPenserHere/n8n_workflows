@@ -44,6 +44,7 @@ async function runAsyncCode(name, inputs, linked, httpRequest) {
 function configRows(payload, overrides = {}) {
   return Object.entries({
     DOMAIN_EXPIRATION_CONFIG: JSON.stringify(payload),
+    PLAYWRIGHT_BASE_URL: 'http://playwright-api:8080',
     NOTIFICATIONS_BASE_URL: 'https://ntfy.example.test',
     NOTIFICATIONS_INFRA_ISSUES_TOPIC: 'infra-issues',
     NOTIFICATIONS_USER: 'test-user',
@@ -67,6 +68,17 @@ function nextNode(name, output = 0) {
   const edges = workflow.connections[name]?.main[output] || [];
   assert.equal(edges.length, 1, `Expected one continuation from ${name}, output ${output}`);
   return edges[0].node;
+}
+
+function renderRequest(item) {
+  const parameters = nodes['Render ICANN Lookup'].parameters;
+  const evaluate = (expression) => vm.runInNewContext(
+    expression.match(/^=\{\{\s*([\s\S]*?)\s*\}\}$/)[1], { $json: item }, { timeout: 1000 },
+  );
+  return {
+    url: new URL(evaluate(parameters.url)),
+    body: JSON.parse(JSON.stringify(evaluate(parameters.jsonBody))),
+  };
 }
 
 // A small graph driver checks the actual exported connections, including the loop's
@@ -93,6 +105,11 @@ async function runGraph(rows, lookups, ntfyReplies = {}) {
       if (domain) linked[current] = domain;
     } else if (node.type.endsWith('.httpRequest')) {
       const domain = inputs[0].domain;
+      const request = renderRequest(inputs[0]);
+      assert.equal(request.url.origin, 'http://playwright-api:8080');
+      assert.equal(request.url.pathname, '/render/actions');
+      assert.equal(request.body.url, 'https://lookup.icann.org/en');
+      assert.equal(request.body.actions[0].value, domain);
       events.push(`lookup:${domain}`);
       assert.ok(domain in lookups, `Unexpected lookup: ${domain}`);
       inputs = [lookups[domain]];
@@ -136,12 +153,48 @@ test('the SQL example stores parseable domain JSON as TEXT', () => {
 test('configuration normalizes and deduplicates names in their first-seen order', () => {
   const items = runCode('Parse Domain Config', configRows({
     domains: [' ARAMBURO.DEV. ', 'laziness.rocks', 'aramburo.dev', 'xn--bcher-kva.de'],
-    lookupUrl: 'https://lookup.example.test/v1/icann/lookup',
   }, { NOTIFICATIONS_BASE_URL: ' https://ntfy.example.test/// ', NOTIFICATIONS_USER: ' test-user ' }));
   assert.deepEqual(items.map((item) => item.json.domain), ['aramburo.dev', 'laziness.rocks', 'xn--bcher-kva.de']);
   assert.equal(items[0].json.notifications.baseUrl, 'https://ntfy.example.test');
   assert.equal(items[0].json.notifications.user, 'test-user');
-  assert.equal(items[0].json.lookupUrl, 'https://lookup.example.test/v1/icann/lookup');
+  assert.equal(items[0].json.renderInstructions.url, 'https://lookup.icann.org/en');
+  assert.equal(items[0].json.renderInstructions.actions[0].value, 'aramburo.dev');
+});
+
+test('Playwright action requests preserve Docker host/port and tolerate trailing slashes', () => {
+  for (const [base, expected] of [
+    ['http://playwright-api:8080', 'http://playwright-api:8080/render/actions'],
+    ['http://playwright-api:8080/', 'http://playwright-api:8080/render/actions'],
+    [' http://srv-captain--playwright-api:8080/// ', 'http://srv-captain--playwright-api:8080/render/actions'],
+    ['http://playwright:9000/api/', 'http://playwright:9000/api/render/actions'],
+    ['http://[fd00::1]:8080/', 'http://[fd00::1]:8080/render/actions'],
+    ['https://playwright.internal:8443', 'https://playwright.internal:8443/render/actions'],
+  ]) {
+    const items = runCode('Parse Domain Config', configRows({ domains: ['aramburo.dev', 'laziness.rocks'] }, { PLAYWRIGHT_BASE_URL: base }));
+    for (const { json: item } of items) {
+      assert.equal(item.renderUrl, expected);
+      const request = renderRequest(item);
+      assert.equal(request.url.origin + request.url.pathname, expected);
+      assert.equal(request.url.search, '');
+      assert.equal(request.body.url, 'https://lookup.icann.org/en');
+      assert.equal(request.body.wait_until, 'domcontentloaded');
+      assert.equal(request.body.timeout_ms, 45000);
+      assert.deepEqual(request.body.actions, [
+        { type: 'fill', selector: '#input-domain', value: item.domain },
+        { type: 'click', selector: '#domain-form button[type="submit"]' },
+        { type: 'wait_for', selector: 'span.date.registry-expiration:text-matches("[0-9]{4}-[0-9]{2}-[0-9]{2}")', state: 'visible' },
+      ]);
+    }
+  }
+});
+
+test('missing or malformed Playwright addresses fail before rendering', () => {
+  const rows = configRows({ domains: ['laziness.rocks'] }).filter((row) => row.name !== 'PLAYWRIGHT_BASE_URL');
+  assert.throws(() => runCode('Parse Domain Config', rows), /PLAYWRIGHT_BASE_URL/);
+  for (const base of [null, '', ' ', 'playwright:8080', 'file:///tmp/render', 'http://playwright:0', 'http://playwright:65536',
+    'http://playwright:port', 'http://user:pass@playwright:8080', 'http://playwright:8080?url=example', 'http://playwright:8080/#fragment']) {
+    assert.throws(() => runCode('Parse Domain Config', configRows({ domains: ['laziness.rocks'] }, { PLAYWRIGHT_BASE_URL: base })), /PLAYWRIGHT_BASE_URL/);
+  }
 });
 
 test('an empty domain list intentionally stops before lookup or notification', async () => {
@@ -157,9 +210,6 @@ test('missing, malformed, double-serialized, and invalid configuration is reject
   }
   for (const domain of ['', null, {}, 'https://aramburo.dev', 'aramburo.dev/path', '-bad.dev', 'bad..dev', 'bücher.de', '127.0.0.1', `${'x'.repeat(64)}.dev`]) {
     assert.throws(() => runCode('Parse Domain Config', configRows({ domains: ['aramburo.dev', domain] })), /domain|DNS/);
-  }
-  for (const lookupUrl of [null, 'file:///tmp/lookup', 'https://example.test/?domain=other.dev', 'https://user:pass@example.test/lookup', 'https://example.test/#fragment']) {
-    assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [], lookupUrl })), /lookupUrl/);
   }
 });
 
@@ -194,7 +244,12 @@ test('all reminder and critical boundaries retain the original floored-day rules
 });
 
 test('JSON envelopes and HTML attribute/class variations retain current domain identity', () => {
-  assert.equal(analyze(lookupResponse(60, true), 'laziness.rocks').domain, 'laziness.rocks');
+  for (const field of ['html', 'data']) {
+    const result = analyze({ statusCode: 200, data: JSON.stringify({ [field]: lookupResponse(60).data }) }, 'laziness.rocks');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.domain, 'laziness.rocks');
+    assert.equal(result.daysUntilExpiration, 60);
+  }
   const result = analyze({ statusCode: 200, data: JSON.stringify({
     data: "<span data-source='registry' class='extra registry-expiration date'>\n 2026-12-02&nbsp;01:00:00 UTC\n</span>",
   }) }, 'perfildelinversionistainverplux.com');
@@ -202,6 +257,16 @@ test('JSON envelopes and HTML attribute/class variations retain current domain i
   assert.equal(result.expirationDateParsed, '2026-12-02T01:00:00.000Z');
   assert.equal(result.daysUntilExpiration, 30);
   assert.match(result.message, /perfildelinversionistainverplux\.com/);
+});
+
+test('a rendered ICANN home form is diagnosed as an incomplete search', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'fixtures/icann-home.html'), 'utf8');
+  const result = analyze({ statusCode: 200, data: html });
+  assert.equal(result.status, 'error');
+  assert.equal(result.error.stage, 'parse');
+  assert.match(result.error.message, /home lookup form.*submission did not complete/);
+  assert.equal(result.shouldNotify, true);
+  assert.equal(result.expirationDate, null);
 });
 
 test('UTC parsing accepts milliseconds and rejects invalid calendar dates and ambiguous zones', () => {
@@ -351,11 +416,15 @@ test('export settings preserve one daily schedule, sequential looping, and error
   assert.equal(nodes['Loop Domains'].parameters.batchSize, 1);
   assert.equal(nodes['Loop Domains'].parameters.options.reset || false, false);
   assert.equal(nodes['Get Domain Config'].alwaysOutputData, true);
-  assert.equal(nodes['Fetch ICANN Data'].parameters.options.timeout, 30000);
-  assert.equal(nodes['Fetch ICANN Data'].parameters.options.response.response.responseFormat, 'text');
-  assert.equal(nodes['Fetch ICANN Data'].onError, 'continueRegularOutput');
+  assert.equal(nodes['Render ICANN Lookup'].parameters.method, 'POST');
+  assert.equal(nodes['Render ICANN Lookup'].parameters.specifyBody, 'json');
+  assert.equal(nodes['Render ICANN Lookup'].parameters.options.timeout, 60000);
+  assert.equal(nodes['Render ICANN Lookup'].parameters.options.response.response.responseFormat, 'text');
+  assert.equal(nodes['Render ICANN Lookup'].onError, 'continueRegularOutput');
+  assert.ok(nodes['Get Domain Config'].parameters.query.includes("'PLAYWRIGHT_BASE_URL'"));
   assert.ok(workflow.nodes.every((node) => !node.type.endsWith('.telegram')));
   assert.doesNotMatch(JSON.stringify(workflow), /PERSONAL_TELEGRAM_CHAT_ID|telegramApi/);
+  assert.doesNotMatch(JSON.stringify(workflow), /selenium-service|\/v1\/icann\/lookup|config\.lookupUrl/);
   for (const source of Object.values(workflow.connections)) {
     for (const output of source.main) {
       for (const edge of output) assert.ok(nodes[edge.node], `Unknown connection target ${edge.node}`);
