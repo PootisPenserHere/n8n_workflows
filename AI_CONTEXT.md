@@ -1105,3 +1105,48 @@ Any change to scheduling, condition classification, Redis key namespaces/TTLs, W
 - this `AI_CONTEXT.md` weather section
 
 Do not create a workflow-local AI context file; the root `AI_CONTEXT.md` remains the repository-wide AI context source.
+
+## Domain expiration — configured domains
+
+### Files and migration
+
+- `workflows/domain-expiration/Domain expiration - Configured domains.json` is the single canonical export; it is inactive until imported/configured/activated.
+- `workflows/domain-expiration/README.md` documents setup, configuration, migration, and operations.
+- `database/domain-expiration/config.example.sql` upserts the serialized JSON config and seeds the shared chat only if absent.
+- `workflows/domain-expiration/test-domain-expiration.cjs` runs offline Code-node and graph checks with Node's built-in test runner.
+- The three old per-domain exports were replaced. Deactivate deployed workflows named **Domain expiration - aramburo.dev**, **Domain expiration - laziness.rocks**, and **Domain expiration - inver** before activating the replacement; repository changes do not deactivate deployed copies.
+
+### Configuration and credentials
+
+- Read `DOMAIN_EXPIRATION_CONFIG` and `PERSONAL_TELEGRAM_CHAT_ID` from `public.key_value_store` through the existing `automation-db` PostgreSQL credential.
+- The table's value column is `data TEXT`, not a JSON/JSONB column. Store one serialized JSON object, then parse `row.data` with `JSON.parse` in the workflow. The SQL example uses `::jsonb::text` to validate and serialize the literal into TEXT.
+- The required payload is `{"domains":["aramburo.dev","laziness.rocks","perfildelinversionistainverplux.com"]}`. The third name is the actual domain from the former **inver** workflow.
+- `domains` must be an array of bare DNS-name strings. Trim whitespace, lowercase, remove one trailing dot, validate DNS labels, and deduplicate while preserving first occurrence. Punycode is required for internationalized names. Validate the whole list before issuing requests.
+- An empty domain array intentionally stops the run without lookups, Telegram sends, or a summary. Missing/invalid config or chat ID throws. PostgreSQL has `alwaysOutputData` enabled so a query returning no rows still reaches validation.
+- Optional `lookupUrl` overrides `http://srv-captain--selenium-service:8000/v1/icann/lookup`. It must be an absolute HTTP(S) endpoint with no credentials, query, or fragment; the HTTP Request node supplies the encoded `domain` query parameter.
+- `PERSONAL_TELEGRAM_CHAT_ID` supplies the numeric destination for both existing bots. The SQL example seeds `687532978` only when the shared key is absent.
+- Expiration messages retain the `laziness_rocks_devops_bot` credential; lookup/parsing errors retain `laziness_rocks_noficiations_bot` (existing spelling). Bot tokens remain in n8n credentials. Reselect all three credentials after import if IDs are stale.
+
+### Runtime contract
+
+- A daily `0 1 * * *` schedule uses the workflow/instance time zone. A manual trigger uses the identical path and can send real notifications.
+- Read config afresh on every execution. **Loop Domains** uses Split in Batches v3 with `batchSize: 1`, reset disabled, output 0 = done, output 1 = loop. There are no sleeps or staggered schedules. Finish each lookup and optional notification before advancing.
+- **Fetch ICANN Data** uses HTTP Request v4.2 with a 30-second timeout, full text response in `data`, HTTP errors returned for classification, and transport errors continued on the regular output.
+- Accept raw HTML or serialized JSON containing an HTML string in `data`. Find the span whose class list includes `date` and `registry-expiration`, independent of attribute/class order or quote style.
+- Parse `YYYY-MM-DD HH:mm:ss UTC` or ISO UTC timestamps (optional milliseconds) explicitly, validate calendar components, and compute `max(0, floor((expirationMs - checkedMs) / 86400000))` without host-time-zone dependence.
+- Preserve exact 60-, 30-, and 15-day alerts plus critical alerts whenever days <=10. Expired domains stay at zero and have an explicit expired message; future expirations within 24 hours are also zero floored days but have `expired: false`.
+- Request and parse failures become per-domain error results and are sent through the existing error bot. Both Telegram nodes continue on sending errors; **Record Notification Result** restores the current domain result and records confirmed Telegram delivery or failure before returning to the loop.
+- Use linked current-loop/current-analysis items, not the first configured domain, when recovering context after HTTP/Telegram replaces item JSON.
+- No persistent notification state, retry sleeps, or catch-up reminders are introduced. Critical/error alerts repeat per execution; manual runs may repeat reminders. Exact-threshold reminders missed during downtime are not backfilled.
+- **Run Summary** returns `status: ok|partial_error`, checked/error/sent/notification-failure counts, completion time, and per-domain results. Handled failures do not fail the n8n execution; inspect summary status. Database/config errors still fail directly. No success notification is sent.
+
+### Compatibility, references, and validation
+
+- Node versions and full-text response/Telegram output contracts were checked against n8n 2.7.3 source. The workflow does not depend on the Code-node global `URL` constructor.
+- Loop source: https://github.com/n8n-io/n8n/blob/n8n%402.7.3/packages/nodes-base/nodes/SplitInBatches/v3/SplitInBatchesV3.node.ts
+- HTTP Request source: https://github.com/n8n-io/n8n/blob/n8n%402.7.3/packages/nodes-base/nodes/HttpRequest/V3/HttpRequestV3.node.ts
+- Telegram source: https://github.com/n8n-io/n8n/blob/n8n%402.7.3/packages/nodes-base/nodes/Telegram/Telegram.node.ts
+- Documentation: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/ and https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
+- Offline checks execute the exported embedded JavaScript with fixed UTC time and mocked n8n data, and route mixed successes/failures through the exported graph. They do not constitute a live n8n import or integration test. Import/manual verification requires the local database, credentials, and lookup service.
+
+Update both this section and the domain-expiration README when config shape, scheduling, alert policy, provider parsing, credential routing, or continuation behavior changes.

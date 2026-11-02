@@ -14,6 +14,7 @@ Workflow directories with setup/operation notes include:
 
 - `workflows/brave-search/README.md`
 - `workflows/calendar-notifications/README.md`
+- `workflows/domain-expiration/README.md`
 - `workflows/jina-reader/README.md`
 - `workflows/weather-notifications/README.md`
 
