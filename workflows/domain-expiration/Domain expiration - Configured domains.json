@@ -35,7 +35,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT name, data FROM public.key_value_store WHERE name IN ('DOMAIN_EXPIRATION_CONFIG', 'PERSONAL_TELEGRAM_CHAT_ID')",
+        "query": "SELECT name, data FROM public.key_value_store WHERE name IN ('DOMAIN_EXPIRATION_CONFIG', 'NOTIFICATIONS_BASE_URL', 'NOTIFICATIONS_INFRA_ISSUES_TOPIC', 'NOTIFICATIONS_USER', 'NOTIFICATIONS_PASSWORD')",
         "options": {}
       },
       "id": "ce81586d-eac8-4e2c-9c3d-4f9c64a05989",
@@ -57,7 +57,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const values = Object.fromEntries($input.all().map((item) => [item.json.name, item.json.data]));\nconst raw = values.DOMAIN_EXPIRATION_CONFIG;\nif (typeof raw !== 'string' || !raw.trim()) {\n  throw new Error('Missing required public.key_value_store key: DOMAIN_EXPIRATION_CONFIG');\n}\n\nlet config;\ntry { config = JSON.parse(raw); }\ncatch { throw new Error('DOMAIN_EXPIRATION_CONFIG.data must be a JSON object serialized as text'); }\nif (!config || typeof config !== 'object' || Array.isArray(config) || !Array.isArray(config.domains)) {\n  throw new Error('DOMAIN_EXPIRATION_CONFIG must contain a domains array of domain-name strings');\n}\n\nconst chatId = String(values.PERSONAL_TELEGRAM_CHAT_ID ?? '').trim();\nif (!/^-?\\d+$/.test(chatId)) {\n  throw new Error('PERSONAL_TELEGRAM_CHAT_ID must contain a numeric Telegram chat ID');\n}\n\nconst lookupUrl = config.lookupUrl === undefined\n  ? 'http://srv-captain--selenium-service:8000/v1/icann/lookup'\n  : typeof config.lookupUrl === 'string' ? config.lookupUrl.trim() : '';\nif (!/^https?:\\/\\/[^\\s/?#@]+(?:\\/[^\\s?#]*)?$/i.test(lookupUrl)) {\n  throw new Error('DOMAIN_EXPIRATION_CONFIG.lookupUrl must be an absolute HTTP(S) endpoint without credentials, query parameters, or a fragment');\n}\n\nconst domains = [];\nconst seen = new Set();\nfor (const [index, value] of config.domains.entries()) {\n  if (typeof value !== 'string') {\n    throw new Error(`DOMAIN_EXPIRATION_CONFIG.domains[${index}] must be a domain-name string`);\n  }\n  const domain = value.trim().toLowerCase().replace(/\\.$/, '');\n  const labels = domain.split('.');\n  if (domain.length > 253 || labels.length < 2 || labels.some((label) =>\n    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)\n  ) || /^\\d+$/.test(labels[labels.length - 1])) {\n    throw new Error(`Invalid domain at DOMAIN_EXPIRATION_CONFIG.domains[${index}]; use a bare DNS name (punycode for internationalized names)`);\n  }\n  if (!seen.has(domain)) {\n    domains.push(domain);\n    seen.add(domain);\n  }\n}\n\n// Validate the entire list before returning any items. An empty array pauses all checks.\nreturn domains.map((domain) => ({\n  json: { domain, chatId, lookupUrl },\n  pairedItem: { item: 0 },\n}));"
+        "jsCode": "const values = Object.fromEntries($input.all().map((item) => [item.json.name, item.json.data]));\nconst raw = values.DOMAIN_EXPIRATION_CONFIG;\nif (typeof raw !== 'string' || !raw.trim()) {\n  throw new Error('Missing required public.key_value_store key: DOMAIN_EXPIRATION_CONFIG');\n}\n\nlet config;\ntry { config = JSON.parse(raw); }\ncatch { throw new Error('DOMAIN_EXPIRATION_CONFIG.data must be a JSON object serialized as text'); }\nif (!config || typeof config !== 'object' || Array.isArray(config) || !Array.isArray(config.domains)) {\n  throw new Error('DOMAIN_EXPIRATION_CONFIG must contain a domains array of domain-name strings');\n}\n\nconst required = ['NOTIFICATIONS_BASE_URL', 'NOTIFICATIONS_INFRA_ISSUES_TOPIC'];\nconst missing = required.filter((key) => values[key] === undefined || values[key] === null || String(values[key]).trim() === '');\nif (missing.length) throw new Error(`Missing required public.key_value_store keys: ${missing.join(', ')}`);\n\nconst notifications = {\n  baseUrl: String(values.NOTIFICATIONS_BASE_URL).trim().replace(/\\/+$/, ''),\n  topic: String(values.NOTIFICATIONS_INFRA_ISSUES_TOPIC).trim(),\n  user: String(values.NOTIFICATIONS_USER ?? '').trim(),\n  password: String(values.NOTIFICATIONS_PASSWORD ?? ''),\n};\nif (!/^https?:\\/\\/[^\\s/]+(?:\\/.*)?$/i.test(notifications.baseUrl)) {\n  throw new Error('NOTIFICATIONS_BASE_URL must be an absolute HTTP(S) URL');\n}\nif ((notifications.user && !notifications.password) || (!notifications.user && notifications.password)) {\n  throw new Error('NOTIFICATIONS_USER and NOTIFICATIONS_PASSWORD must either both be configured or both be empty');\n}\n\nconst lookupUrl = config.lookupUrl === undefined\n  ? 'http://srv-captain--selenium-service:8000/v1/icann/lookup'\n  : typeof config.lookupUrl === 'string' ? config.lookupUrl.trim() : '';\nif (!/^https?:\\/\\/[^\\s/?#@]+(?:\\/[^\\s?#]*)?$/i.test(lookupUrl)) {\n  throw new Error('DOMAIN_EXPIRATION_CONFIG.lookupUrl must be an absolute HTTP(S) endpoint without credentials, query parameters, or a fragment');\n}\n\nconst domains = [];\nconst seen = new Set();\nfor (const [index, value] of config.domains.entries()) {\n  if (typeof value !== 'string') {\n    throw new Error(`DOMAIN_EXPIRATION_CONFIG.domains[${index}] must be a domain-name string`);\n  }\n  const domain = value.trim().toLowerCase().replace(/\\.$/, '');\n  const labels = domain.split('.');\n  if (domain.length > 253 || labels.length < 2 || labels.some((label) =>\n    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)\n  ) || /^\\d+$/.test(labels[labels.length - 1])) {\n    throw new Error(`Invalid domain at DOMAIN_EXPIRATION_CONFIG.domains[${index}]; use a bare DNS name (punycode for internationalized names)`);\n  }\n  if (!seen.has(domain)) {\n    domains.push(domain);\n    seen.add(domain);\n  }\n}\n\n// Validate the entire list before returning any items. An empty array pauses all checks.\nreturn domains.map((domain) => ({\n  json: { domain, lookupUrl, notifications },\n  pairedItem: { item: 0 },\n}));"
       },
       "id": "93808e6b-81a0-460c-8bf4-3de8470af60a",
       "name": "Parse Domain Config",
@@ -67,7 +67,7 @@
         -960,
         240
       ],
-      "notes": "Parse the TEXT data column with JSON.parse. Validate the complete list, normalize and deduplicate domain names, and emit one item per domain. An empty domains array stops the run."
+      "notes": "Parse the TEXT data column with JSON.parse. Validate the complete domain list and shared ntfy settings, normalize and deduplicate domain names, and emit one item per domain. An empty domains array stops the run."
     },
     {
       "parameters": {
@@ -121,7 +121,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Resolve the current loop item through item linking, never the first configured domain.\nconst { domain, chatId } = $('Loop Domains').item.json;\nconst response = $input.first().json;\nconst checkedAt = new Date().toISOString();\nconst checkedMs = Date.parse(checkedAt);\nconst escapeHtml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst result = {\n  domain, chatId, checkedAt,\n  status: 'ok',\n  expirationDate: null,\n  expirationDateParsed: null,\n  daysUntilExpiration: null,\n  expired: false,\n  alertLevel: null,\n  error: null,\n  shouldNotify: false,\n  notificationType: null,\n  message: '',\n  notification: { status: 'not_required' },\n};\nconst fail = (stage, detail) => {\n  const message = String(detail).slice(0, 1000);\n  return [{ json: {\n    ...result,\n    status: 'error',\n    error: { stage, message },\n    shouldNotify: true,\n    notificationType: 'error',\n    message: `${stage === 'request' ? '❌ ICANN Request Error' : '❌ Date Parsing Error'}\\n\\n🌐 Domain: ${domain}\\n📝 Error Details:\\n${escapeHtml(message)}\\n\\nManual verification required. The remaining domains will still be checked.`,\n  }, pairedItem: { item: 0 } }];\n};\n\nif (response.error) {\n  return fail('request', typeof response.error === 'string' ? response.error : response.error.message || 'ICANN lookup failed');\n}\nconst statusCode = Number(response.statusCode);\nif (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {\n  return fail('request', Number.isFinite(statusCode) ? `ICANN lookup returned HTTP ${statusCode}` : 'ICANN lookup did not return an HTTP status');\n}\n\ntry {\n  // HTTP Request's text/full-response mode puts the raw body in data.\n  // Accept both an HTML body and the existing service's JSON {data: \"<html>...\"} envelope.\n  let html = response.data;\n  if (typeof html === 'string' && html.trimStart().startsWith('{')) {\n    let payload;\n    try { payload = JSON.parse(html); }\n    catch { throw new Error('ICANN lookup returned malformed JSON'); }\n    html = payload.data;\n  }\n  if (typeof html !== 'string' || !html.trim()) {\n    throw new Error('ICANN lookup did not return HTML in its body or data field');\n  }\n\n  let expirationDate;\n  for (const span of html.matchAll(/<span\\b([^>]*)>([\\s\\S]*?)<\\/span\\s*>/gi)) {\n    const classAttribute = span[1].match(/\\bclass\\s*=\\s*([\"'])([\\s\\S]*?)\\1/i);\n    const classes = classAttribute ? classAttribute[2].split(/\\s+/) : [];\n    if (classes.includes('date') && classes.includes('registry-expiration')) {\n      expirationDate = span[2].replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;|&#x0*a0;/gi, ' ').replace(/\\s+/g, ' ').trim();\n      break;\n    }\n  }\n  if (!expirationDate) throw new Error('Could not find the registry-expiration date in the ICANN response');\n\n  // Parse known UTC formats explicitly so the n8n host time zone cannot change the result.\n  const match = expirationDate.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})(\\.\\d{1,3})?(?:\\s+UTC|Z)$/i);\n  if (!match) throw new Error('Registry expiration date must use YYYY-MM-DD HH:mm:ss UTC or an ISO 8601 UTC timestamp');\n  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);\n  const millisecond = Number((match[7] || '').slice(1).padEnd(3, '0'));\n  const expirationMs = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);\n  const expiration = new Date(expirationMs);\n  if (expiration.getUTCFullYear() !== year || expiration.getUTCMonth() !== month - 1 ||\n      expiration.getUTCDate() !== day || expiration.getUTCHours() !== hour ||\n      expiration.getUTCMinutes() !== minute || expiration.getUTCSeconds() !== second) {\n    throw new Error('Registry expiration date contains an invalid calendar date or time');\n  }\n\n  const days = Math.max(0, Math.floor((expirationMs - checkedMs) / 86400000));\n  result.expirationDate = expirationDate;\n  result.expirationDateParsed = expiration.toISOString();\n  result.daysUntilExpiration = days;\n  result.expired = expirationMs <= checkedMs;\n  result.alertLevel = days <= 10 ? 'critical' : [60, 30, 15].includes(days) ? `${days}_days` : null;\n  result.shouldNotify = result.alertLevel !== null;\n  if (result.shouldNotify) {\n    result.notificationType = 'expiration';\n    const title = days <= 10 ? '🔴 CRITICAL - Domain Expiration Alert'\n      : `${days === 15 ? '🚨' : '⚠️'} Domain Expiration Alert - ${days} Days`;\n    const action = result.expired ? '🔴 Your domain has expired. RENEW IMMEDIATELY and verify its registration status!'\n      : days <= 10 ? '🔴 CRITICAL: RENEW IMMEDIATELY to avoid losing your domain!'\n      : days === 15 ? '🚨 URGENT: Renew NOW!'\n      : days === 30 ? '⚠️ Please renew immediately!'\n      : 'Consider renewing soon.';\n    result.message = `${title}\\n\\n🌐 Domain: ${domain}\\n📅 Expiration Date: ${expirationDate}\\n⏰ Days Until Expiration: ${days}\\n\\n${action}`;\n  }\n  return [{ json: result, pairedItem: { item: 0 } }];\n} catch (error) {\n  return fail('parse', error.message || 'Could not parse the registry expiration date');\n}"
+        "jsCode": "// Resolve the current loop item through item linking, never the first configured domain.\nconst { domain } = $('Loop Domains').item.json;\nconst response = $input.first().json;\nconst checkedAt = new Date().toISOString();\nconst checkedMs = Date.parse(checkedAt);\nconst result = {\n  domain, checkedAt,\n  status: 'ok',\n  expirationDate: null,\n  expirationDateParsed: null,\n  daysUntilExpiration: null,\n  expired: false,\n  alertLevel: null,\n  error: null,\n  shouldNotify: false,\n  notificationType: null,\n  title: '',\n  message: '',\n  notification: { status: 'not_required' },\n};\nconst fail = (stage, detail) => {\n  const message = String(detail).slice(0, 1000);\n  return [{ json: {\n    ...result,\n    status: 'error',\n    error: { stage, message },\n    shouldNotify: true,\n    notificationType: 'error',\n    title: stage === 'request' ? '❌ ICANN Request Error' : '❌ Date Parsing Error',\n    message: `🌐 Domain: ${domain}\\n📝 Error Details:\\n${message}\\n\\nManual verification required. The remaining domains will still be checked.`,\n  }, pairedItem: { item: 0 } }];\n};\n\nif (response.error) {\n  return fail('request', typeof response.error === 'string' ? response.error : response.error.message || 'ICANN lookup failed');\n}\nconst statusCode = Number(response.statusCode);\nif (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {\n  return fail('request', Number.isFinite(statusCode) ? `ICANN lookup returned HTTP ${statusCode}` : 'ICANN lookup did not return an HTTP status');\n}\n\ntry {\n  // HTTP Request's text/full-response mode puts the raw body in data.\n  // Accept both an HTML body and the existing service's JSON {data: \"<html>...\"} envelope.\n  let html = response.data;\n  if (typeof html === 'string' && html.trimStart().startsWith('{')) {\n    let payload;\n    try { payload = JSON.parse(html); }\n    catch { throw new Error('ICANN lookup returned malformed JSON'); }\n    html = payload.data;\n  }\n  if (typeof html !== 'string' || !html.trim()) {\n    throw new Error('ICANN lookup did not return HTML in its body or data field');\n  }\n\n  let expirationDate;\n  for (const span of html.matchAll(/<span\\b([^>]*)>([\\s\\S]*?)<\\/span\\s*>/gi)) {\n    const classAttribute = span[1].match(/\\bclass\\s*=\\s*([\"'])([\\s\\S]*?)\\1/i);\n    const classes = classAttribute ? classAttribute[2].split(/\\s+/) : [];\n    if (classes.includes('date') && classes.includes('registry-expiration')) {\n      expirationDate = span[2].replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;|&#x0*a0;/gi, ' ').replace(/\\s+/g, ' ').trim();\n      break;\n    }\n  }\n  if (!expirationDate) throw new Error('Could not find the registry-expiration date in the ICANN response');\n\n  // Parse known UTC formats explicitly so the n8n host time zone cannot change the result.\n  const match = expirationDate.match(/^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})(\\.\\d{1,3})?(?:\\s+UTC|Z)$/i);\n  if (!match) throw new Error('Registry expiration date must use YYYY-MM-DD HH:mm:ss UTC or an ISO 8601 UTC timestamp');\n  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);\n  const millisecond = Number((match[7] || '').slice(1).padEnd(3, '0'));\n  const expirationMs = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);\n  const expiration = new Date(expirationMs);\n  if (expiration.getUTCFullYear() !== year || expiration.getUTCMonth() !== month - 1 ||\n      expiration.getUTCDate() !== day || expiration.getUTCHours() !== hour ||\n      expiration.getUTCMinutes() !== minute || expiration.getUTCSeconds() !== second) {\n    throw new Error('Registry expiration date contains an invalid calendar date or time');\n  }\n\n  const days = Math.max(0, Math.floor((expirationMs - checkedMs) / 86400000));\n  result.expirationDate = expirationDate;\n  result.expirationDateParsed = expiration.toISOString();\n  result.daysUntilExpiration = days;\n  result.expired = expirationMs <= checkedMs;\n  result.alertLevel = days <= 10 ? 'critical' : [60, 30, 15].includes(days) ? `${days}_days` : null;\n  result.shouldNotify = result.alertLevel !== null;\n  if (result.shouldNotify) {\n    result.notificationType = 'expiration';\n    const title = days <= 10 ? '🔴 CRITICAL - Domain Expiration Alert'\n      : `${days === 15 ? '🚨' : '⚠️'} Domain Expiration Alert - ${days} Days`;\n    const action = result.expired ? '🔴 Your domain has expired. RENEW IMMEDIATELY and verify its registration status!'\n      : days <= 10 ? '🔴 CRITICAL: RENEW IMMEDIATELY to avoid losing your domain!'\n      : days === 15 ? '🚨 URGENT: Renew NOW!'\n      : days === 30 ? '⚠️ Please renew immediately!'\n      : 'Consider renewing soon.';\n    result.title = title;\n    result.message = `🌐 Domain: ${domain}\\n📅 Expiration Date: ${expirationDate}\\n⏰ Days Until Expiration: ${days}\\n\\n${action}`;\n  }\n  return [{ json: result, pairedItem: { item: 0 } }];\n} catch (error) {\n  return fail('parse', error.message || 'Could not parse the registry expiration date');\n}"
       },
       "id": "97f3dd2e-c4ce-42cd-b8de-da1ba9d8ef86",
       "name": "Analyze Domain",
@@ -169,110 +169,21 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "9715e33d-5753-4d46-9c25-4b1962583660",
-              "leftValue": "={{ $json.status }}",
-              "rightValue": "error",
-              "operator": {
-                "type": "string",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "id": "f8d97e32-eaed-49f6-b53a-4e1c0c19fa8e",
-      "name": "Lookup Error?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        240,
-        240
-      ]
-    },
-    {
-      "parameters": {
-        "resource": "message",
-        "operation": "sendMessage",
-        "chatId": "={{ $json.chatId }}",
-        "text": "={{ $json.message }}",
-        "additionalFields": {
-          "appendAttribution": false,
-          "parse_mode": "HTML"
-        }
-      },
-      "id": "2fca9a76-bc1a-4a7d-a044-324404429970",
-      "name": "Telegram - Lookup Error",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        480,
-        80
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "PMeL0b3z47aL0tYX",
-          "name": "laziness_rocks_noficiations_bot"
-        }
-      },
-      "onError": "continueRegularOutput",
-      "notes": "Preserve the existing error-notification bot. Sending failures are recorded and do not stop later domains."
-    },
-    {
-      "parameters": {
-        "resource": "message",
-        "operation": "sendMessage",
-        "chatId": "={{ $json.chatId }}",
-        "text": "={{ $json.message }}",
-        "additionalFields": {
-          "appendAttribution": false,
-          "parse_mode": "HTML"
-        }
-      },
-      "id": "4559ce55-70ba-449a-973c-213743b5f3fc",
-      "name": "Telegram - Expiration Alert",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        480,
-        320
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "RYCLrpQ9LwpU2KB8",
-          "name": "laziness_rocks_devops_bot"
-        }
-      },
-      "onError": "continueRegularOutput",
-      "notes": "Preserve the existing expiration-alert bot. No persistent deduplication: critical domains alert on every daily or manual run."
-    },
-    {
-      "parameters": {
-        "jsCode": "const result = $('Analyze Domain').item.json;\nconst response = $input.first().json;\nconst sent = response.ok === true && Number.isInteger(response.result?.message_id);\nconst error = sent ? null : String(\n  typeof response.error === 'string' ? response.error\n    : response.error?.message || response.description || 'Telegram did not confirm message delivery'\n).slice(0, 1000);\nreturn [{ json: {\n  ...result,\n  notification: {\n    status: sent ? 'sent' : 'failed',\n    type: result.notificationType,\n    messageId: sent ? response.result.message_id : null,\n    error,\n  },\n}, pairedItem: { item: 0 } }];"
+        "jsCode": "// Use the current domain's shared ntfy configuration without copying credentials into results.\nconst result = $input.first().json;\nconst cfg = $('Loop Domains').item.json.notifications;\nconst priority = result.alertLevel === 'critical' ? 5\n  : result.notificationType === 'error' || ['30_days', '15_days'].includes(result.alertLevel) ? 4 : 3;\nconst body = {\n  topic: cfg.topic,\n  title: `${result.domain}: ${result.title || 'Domain expiration notification'}`,\n  message: result.message,\n  priority,\n  tags: result.notificationType === 'error' ? ['warning']\n    : result.alertLevel === 'critical' ? ['rotating_light'] : ['calendar'],\n};\nconst headers = { 'Content-Type': 'application/json; charset=utf-8' };\nif (cfg.user && cfg.password) {\n  headers.Authorization = `Basic ${Buffer.from(`${cfg.user}:${cfg.password}`, 'utf8').toString('base64')}`;\n}\n\nlet statusCode = null;\nlet deliveryError = null;\ntry {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: cfg.baseUrl,\n    headers,\n    body: JSON.stringify(body),\n    encoding: 'text',\n    timeout: 20000,\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n  statusCode = Number(response?.statusCode || 0) || null;\n  if (statusCode === null || statusCode < 200 || statusCode >= 300) {\n    deliveryError = `ntfy returned HTTP ${statusCode || 'unknown'}`;\n  }\n} catch (error) {\n  deliveryError = String(error?.message || 'ntfy request failed').slice(0, 1000);\n}\n\nreturn [{ json: {\n  ...result,\n  notification: {\n    status: deliveryError ? 'failed' : 'sent',\n    type: result.notificationType,\n    provider: 'ntfy',\n    topic: cfg.topic,\n    statusCode,\n    error: deliveryError,\n  },\n}, pairedItem: { item: 0 } }];"
       },
       "id": "f7b16722-d5ea-4742-bf0d-ed424e98cf9c",
-      "name": "Record Notification Result",
+      "name": "Send Domain ntfy",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        720,
+        240,
         240
       ],
-      "notes": "Restore the current domain result after Telegram replaces the item with its API response; record confirmed delivery or failure before advancing the loop."
+      "notes": "Publish expiration alerts and lookup errors as JSON to NOTIFICATIONS_BASE_URL using NOTIFICATIONS_INFRA_ISSUES_TOPIC. Optional Basic auth comes from NOTIFICATIONS_USER/PASSWORD. Record 2xx success or a handled failure, then advance the loop."
     },
     {
       "parameters": {
-        "jsCode": "const results = $input.all().map((item) => item.json);\nconst lookupErrorCount = results.filter((result) => result.status === 'error').length;\nconst notificationFailureCount = results.filter((result) => result.notification.status === 'failed').length;\nreturn [{ json: {\n  status: lookupErrorCount || notificationFailureCount ? 'partial_error' : 'ok',\n  checkedCount: results.length,\n  lookupErrorCount,\n  expirationAlertsSent: results.filter((result) => result.notification.status === 'sent' && result.notificationType === 'expiration').length,\n  errorNotificationsSent: results.filter((result) => result.notification.status === 'sent' && result.notificationType === 'error').length,\n  notificationFailureCount,\n  completedAt: new Date().toISOString(),\n  results: results.map(({ chatId, message, shouldNotify, notificationType, ...result }) => result),\n} }];"
+        "jsCode": "const results = $input.all().map((item) => item.json);\nconst lookupErrorCount = results.filter((result) => result.status === 'error').length;\nconst notificationFailureCount = results.filter((result) => result.notification.status === 'failed').length;\nreturn [{ json: {\n  status: lookupErrorCount || notificationFailureCount ? 'partial_error' : 'ok',\n  checkedCount: results.length,\n  lookupErrorCount,\n  expirationAlertsSent: results.filter((result) => result.notification.status === 'sent' && result.notificationType === 'expiration').length,\n  errorNotificationsSent: results.filter((result) => result.notification.status === 'sent' && result.notificationType === 'error').length,\n  notificationFailureCount,\n  completedAt: new Date().toISOString(),\n  results: results.map(({ title, message, shouldNotify, notificationType, ...result }) => result),\n} }];"
       },
       "id": "2c5c4c24-e946-4802-900a-cc9d08fed843",
       "name": "Run Summary",
@@ -282,12 +193,12 @@
         -480,
         -80
       ],
-      "notes": "Execution output only; no daily success notification. partial_error means at least one lookup or Telegram send failed. Config/database failures still fail the execution."
+      "notes": "Execution output only; no daily success notification. partial_error means at least one lookup or ntfy send failed. Config/database failures still fail the execution."
     },
     {
       "parameters": {
-        "content": "## Single configured domain-expiration workflow\n\nRead `DOMAIN_EXPIRATION_CONFIG` from `public.key_value_store.data` as serialized JSON text:\n`{\"domains\":[\"example.com\"]}`\n\nAlso requires `PERSONAL_TELEGRAM_CHAT_ID`.\nOptional JSON field: `lookupUrl` overrides the existing internal ICANN endpoint.\n\nReselect the `automation-db` PostgreSQL credential and the two Telegram bot credentials after import.\nDisable the three old per-domain workflows before activating this replacement.\n\nSee README.md and ../../database/domain-expiration/config.example.sql. Manual Test sends real notifications when a domain qualifies.",
-        "height": 380,
+        "content": "## Domain expiration + ntfy\n\nRead `DOMAIN_EXPIRATION_CONFIG` from `public.key_value_store.data` as serialized JSON text:\n`{\"domains\":[\"example.com\"]}`\n\nShared ntfy keys: `NOTIFICATIONS_BASE_URL`, `NOTIFICATIONS_INFRA_ISSUES_TOPIC`.\nOptional Basic auth: `NOTIFICATIONS_USER` + `NOTIFICATIONS_PASSWORD` (configure both or neither).\n\nReselect the `automation-db` PostgreSQL credential after import. All expiration alerts and lookup errors publish to the infra-issues topic. The ntfy endpoint is the base URL; topic is included in the JSON body.\n\nUpdate the existing workflow or deactivate its previous copy before activating this export. Manual Test sends real notifications when a domain qualifies.\n\nSee README.md and ../../database/domain-expiration/config.example.sql.",
+        "height": 420,
         "width": 720
       },
       "id": "88c481a3-3c91-4a50-a4df-1ddd8bf0b276",
@@ -390,7 +301,7 @@
       "main": [
         [
           {
-            "node": "Lookup Error?",
+            "node": "Send Domain ntfy",
             "type": "main",
             "index": 0
           }
@@ -404,47 +315,7 @@
         ]
       ]
     },
-    "Lookup Error?": {
-      "main": [
-        [
-          {
-            "node": "Telegram - Lookup Error",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Telegram - Expiration Alert",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Telegram - Lookup Error": {
-      "main": [
-        [
-          {
-            "node": "Record Notification Result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Telegram - Expiration Alert": {
-      "main": [
-        [
-          {
-            "node": "Record Notification Result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Record Notification Result": {
+    "Send Domain ntfy": {
       "main": [
         [
           {

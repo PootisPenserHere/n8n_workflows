@@ -13,9 +13,10 @@ class FixedDate extends Date {
   static now() { return Date.parse(now); }
 }
 
-function runCode(name, inputs, linked = {}) {
-  const output = vm.runInNewContext(`(function () { ${nodes[name].parameters.jsCode}\n})()`, {
+function codeContext(inputs, linked) {
+  return {
     Date: FixedDate,
+    Buffer,
     $input: {
       first: () => ({ json: inputs[0] }),
       all: () => inputs.map((json) => ({ json })),
@@ -24,15 +25,31 @@ function runCode(name, inputs, linked = {}) {
       assert.ok(linkedName in linked, `Missing current linked item for ${linkedName}`);
       return { item: { json: linked[linkedName] } };
     },
+  };
+}
+
+function runCode(name, inputs, linked = {}) {
+  const output = vm.runInNewContext(`(function () { ${nodes[name].parameters.jsCode}\n})()`, codeContext(inputs, linked), { timeout: 1000 });
+  return JSON.parse(JSON.stringify(output));
+}
+
+async function runAsyncCode(name, inputs, linked, httpRequest) {
+  const output = await vm.runInNewContext(`(async function () { ${nodes[name].parameters.jsCode}\n})()`, {
+    ...codeContext(inputs, linked),
+    helpers: { httpRequest },
   }, { timeout: 1000 });
   return JSON.parse(JSON.stringify(output));
 }
 
-function configRows(payload, chatId = '687532978') {
-  return [
-    { name: 'DOMAIN_EXPIRATION_CONFIG', data: JSON.stringify(payload) },
-    { name: 'PERSONAL_TELEGRAM_CHAT_ID', data: chatId },
-  ];
+function configRows(payload, overrides = {}) {
+  return Object.entries({
+    DOMAIN_EXPIRATION_CONFIG: JSON.stringify(payload),
+    NOTIFICATIONS_BASE_URL: 'https://ntfy.example.test',
+    NOTIFICATIONS_INFRA_ISSUES_TOPIC: 'infra-issues',
+    NOTIFICATIONS_USER: 'test-user',
+    NOTIFICATIONS_PASSWORD: 'test-password',
+    ...overrides,
+  }).map(([name, data]) => ({ name, data }));
 }
 function lookupResponse(days, envelope = false) {
   const iso = new Date(Date.parse(now) + days * 86400000).toISOString();
@@ -40,7 +57,11 @@ function lookupResponse(days, envelope = false) {
   return { statusCode: 200, data: envelope ? JSON.stringify({ data: html }) : html };
 }
 function analyze(response, domain = 'aramburo.dev') {
-  return runCode('Analyze Domain', [response], { 'Loop Domains': { domain, chatId: '687532978' } })[0].json;
+  return runCode('Analyze Domain', [response], { 'Loop Domains': { domain } })[0].json;
+}
+async function send(result, httpRequest, overrides = {}) {
+  const item = runCode('Parse Domain Config', configRows({ domains: [result.domain] }, overrides))[0].json;
+  return (await runAsyncCode('Send Domain ntfy', [result], { 'Loop Domains': item }, httpRequest))[0].json;
 }
 function nextNode(name, output = 0) {
   const edges = workflow.connections[name]?.main[output] || [];
@@ -50,7 +71,7 @@ function nextNode(name, output = 0) {
 
 // A small graph driver checks the actual exported connections, including the loop's
 // two outputs and conditional routes. n8n itself still needs an import/manual check.
-function runGraph(rows, lookups, telegramReplies = {}) {
+async function runGraph(rows, lookups, ntfyReplies = {}) {
   let current = nextNode('Manual Test');
   let inputs = [{}];
   let pending;
@@ -75,10 +96,6 @@ function runGraph(rows, lookups, telegramReplies = {}) {
       events.push(`lookup:${domain}`);
       assert.ok(domain in lookups, `Unexpected lookup: ${domain}`);
       inputs = [lookups[domain]];
-    } else if (node.type.endsWith('.telegram')) {
-      const domain = inputs[0].domain;
-      events.push(`${current}:${domain}`);
-      inputs = [telegramReplies[domain] || { ok: true, result: { message_id: 42 } }];
     } else if (node.type.endsWith('.if')) {
       const condition = node.parameters.conditions.conditions[0];
       const expression = condition.leftValue.match(/^=\{\{\s*([\s\S]*?)\s*\}\}$/)[1];
@@ -86,7 +103,18 @@ function runGraph(rows, lookups, telegramReplies = {}) {
       const passed = condition.operator.type === 'boolean' ? value === true : value === condition.rightValue;
       output = passed ? 0 : 1;
     } else if (node.type.endsWith('.code')) {
-      inputs = runCode(current, inputs, linked).map((item) => item.json);
+      if (current === 'Send Domain ntfy') {
+        const domain = inputs[0].domain;
+        inputs = (await runAsyncCode(current, inputs, linked, async (request) => {
+          events.push(`ntfy:${domain}`);
+          assert.equal(JSON.parse(request.body).topic, 'infra-issues');
+          const reply = ntfyReplies[domain];
+          if (reply instanceof Error) throw reply;
+          return reply || { statusCode: 200 };
+        })).map((item) => item.json);
+      } else {
+        inputs = runCode(current, inputs, linked).map((item) => item.json);
+      }
       if (current === 'Run Summary') return { summary: inputs[0], events };
       linked[current] = inputs[0];
       if (!inputs.length) return { summary: null, events };
@@ -98,26 +126,26 @@ function runGraph(rows, lookups, telegramReplies = {}) {
   assert.fail('Graph did not terminate');
 }
 
-test('the SQL payload seeds every existing domain as JSON serialized into TEXT', () => {
+test('the SQL example stores parseable domain JSON as TEXT', () => {
   const sql = fs.readFileSync(path.join(__dirname, '../../database/domain-expiration/config.example.sql'), 'utf8');
   const payload = JSON.parse(sql.match(/\$domain_config\$([\s\S]*?)\$domain_config\$::jsonb::text/)[1]);
-  assert.deepEqual(runCode('Parse Domain Config', configRows(payload)).map((item) => item.json.domain), [
-    'aramburo.dev', 'laziness.rocks', 'perfildelinversionistainverplux.com',
-  ]);
+  assert.ok(payload.domains.length > 0);
+  assert.deepEqual(runCode('Parse Domain Config', configRows(payload)).map((item) => item.json.domain), payload.domains);
 });
 
 test('configuration normalizes and deduplicates names in their first-seen order', () => {
   const items = runCode('Parse Domain Config', configRows({
     domains: [' ARAMBURO.DEV. ', 'laziness.rocks', 'aramburo.dev', 'xn--bcher-kva.de'],
     lookupUrl: 'https://lookup.example.test/v1/icann/lookup',
-  }, '-1001234567890'));
+  }, { NOTIFICATIONS_BASE_URL: ' https://ntfy.example.test/// ', NOTIFICATIONS_USER: ' test-user ' }));
   assert.deepEqual(items.map((item) => item.json.domain), ['aramburo.dev', 'laziness.rocks', 'xn--bcher-kva.de']);
-  assert.equal(items[0].json.chatId, '-1001234567890');
+  assert.equal(items[0].json.notifications.baseUrl, 'https://ntfy.example.test');
+  assert.equal(items[0].json.notifications.user, 'test-user');
   assert.equal(items[0].json.lookupUrl, 'https://lookup.example.test/v1/icann/lookup');
 });
 
-test('an empty domain list intentionally stops before lookup or notification', () => {
-  assert.deepEqual(runGraph(configRows({ domains: [] }), {}), { summary: null, events: [] });
+test('an empty domain list intentionally stops before lookup or notification', async () => {
+  assert.deepEqual(await runGraph(configRows({ domains: [] }), {}), { summary: null, events: [] });
 });
 
 test('missing, malformed, double-serialized, and invalid configuration is rejected', () => {
@@ -133,8 +161,19 @@ test('missing, malformed, double-serialized, and invalid configuration is reject
   for (const lookupUrl of [null, 'file:///tmp/lookup', 'https://example.test/?domain=other.dev', 'https://user:pass@example.test/lookup', 'https://example.test/#fragment']) {
     assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [], lookupUrl })), /lookupUrl/);
   }
-  assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }, '')), /CHAT_ID/);
-  assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }).slice(0, 1)), /CHAT_ID/);
+});
+
+test('ntfy requires its base URL and infrastructure topic, with optional credentials as a pair', () => {
+  for (const key of ['NOTIFICATIONS_BASE_URL', 'NOTIFICATIONS_INFRA_ISSUES_TOPIC']) {
+    assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }).filter((row) => row.name !== key)), new RegExp(key));
+    assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }, { [key]: ' ' })), new RegExp(key));
+  }
+  assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }, { NOTIFICATIONS_BASE_URL: 'not-a-url' })), /NOTIFICATIONS_BASE_URL/);
+  for (const overrides of [{ NOTIFICATIONS_USER: '' }, { NOTIFICATIONS_PASSWORD: '' }]) {
+    assert.throws(() => runCode('Parse Domain Config', configRows({ domains: [] }, overrides)), /both be configured/);
+  }
+  const noAuth = configRows({ domains: ['laziness.rocks'] }).filter((row) => !['NOTIFICATIONS_USER', 'NOTIFICATIONS_PASSWORD'].includes(row.name));
+  assert.equal(runCode('Parse Domain Config', noAuth)[0].json.notifications.user, '');
 });
 
 test('all reminder and critical boundaries retain the original floored-day rules', () => {
@@ -193,38 +232,89 @@ test('request failures, missing HTML, malformed JSON, and missing dates yield er
     assert.equal(result.error.stage, stage);
     assert.equal(result.shouldNotify, true);
   }
-  const escaped = analyze({ error: '<unavailable> & failed' });
-  assert.match(escaped.message, /&lt;unavailable&gt; &amp; failed/);
+  const plain = analyze({ error: '<unavailable> & failed' });
+  assert.match(plain.message, /<unavailable> & failed/);
   assert.equal(analyze({ error: 'x'.repeat(5000) }).error.message.length, 1000);
 });
 
-test('Telegram delivery requires confirmation and preserves the linked domain result', () => {
+test('ntfy posts JSON to the base URL with the shared topic and Basic authentication', async () => {
   const result = analyze(lookupResponse(60), 'laziness.rocks');
-  const linked = { 'Analyze Domain': result };
-  const sent = runCode('Record Notification Result', [{ ok: true, result: { message_id: 123 } }], linked)[0].json;
+  let request;
+  const sent = await send(result, async (options) => {
+    request = options;
+    return { statusCode: 200 };
+  }, { NOTIFICATIONS_PASSWORD: 'test-pässword' });
+  assert.equal(request.method, 'POST');
+  assert.equal(request.url, 'https://ntfy.example.test');
+  assert.equal(request.timeout, 20000);
+  assert.equal(request.returnFullResponse, true);
+  assert.equal(request.ignoreHttpStatusErrors, true);
+  assert.equal(request.headers['Content-Type'], 'application/json; charset=utf-8');
+  assert.equal(request.headers.Authorization, `Basic ${Buffer.from('test-user:test-pässword').toString('base64')}`);
+  const body = JSON.parse(request.body);
+  assert.equal(body.topic, 'infra-issues');
+  assert.match(body.title, /laziness\.rocks/);
+  assert.equal(body.message, result.message);
+  assert.equal(body.priority, 3);
+  assert.deepEqual(body.tags, ['calendar']);
   assert.equal(sent.domain, 'laziness.rocks');
   assert.equal(sent.notification.status, 'sent');
-  assert.equal(sent.notification.messageId, 123);
-  for (const response of [{ error: 'Forbidden' }, { error: { message: 'timeout' } }, { ok: false, description: 'Bad Request' }, {}]) {
-    const failed = runCode('Record Notification Result', [response], linked)[0].json;
+  assert.equal(sent.notification.provider, 'ntfy');
+  assert.equal(sent.notification.topic, 'infra-issues');
+  assert.equal(sent.notification.statusCode, 200);
+  assert.ok(!('notifications' in sent));
+  assert.ok(!JSON.stringify(sent).includes('test-pässword'));
+});
+
+test('ntfy omits Basic authentication when both credentials are empty', async () => {
+  await send(analyze(lookupResponse(30)), async (request) => {
+    assert.equal('Authorization' in request.headers, false);
+    return { statusCode: 202 };
+  }, { NOTIFICATIONS_USER: '', NOTIFICATIONS_PASSWORD: '' });
+});
+
+test('ntfy priorities reflect reminder urgency and lookup failures', async () => {
+  for (const [result, priority, tag] of [
+    [analyze(lookupResponse(30)), 4, 'calendar'],
+    [analyze(lookupResponse(15)), 4, 'calendar'],
+    [analyze(lookupResponse(10)), 5, 'rotating_light'],
+    [analyze({ error: 'ETIMEDOUT' }), 4, 'warning'],
+  ]) {
+    await send(result, async (request) => {
+      const body = JSON.parse(request.body);
+      assert.equal(body.topic, 'infra-issues');
+      assert.equal(body.priority, priority);
+      assert.deepEqual(body.tags, [tag]);
+      return { statusCode: 200 };
+    });
+  }
+});
+
+test('ntfy HTTP failures and network errors preserve the current domain result', async () => {
+  const result = analyze(lookupResponse(60), 'laziness.rocks');
+  for (const reply of [{ statusCode: 401 }, { statusCode: 503 }, {}, new Error('ETIMEDOUT')]) {
+    const failed = await send(result, async () => {
+      if (reply instanceof Error) throw reply;
+      return reply;
+    });
     assert.equal(failed.domain, 'laziness.rocks');
     assert.equal(failed.notification.status, 'failed');
-    assert.equal(failed.notification.messageId, null);
+    assert.equal(failed.notification.statusCode, reply.statusCode || null);
     assert.ok(failed.notification.error);
   }
 });
 
-test('the graph processes later domains after lookup and Telegram failures, in order', () => {
-  const { summary, events } = runGraph(configRows({
+test('the graph processes later domains after lookup and ntfy failures, in order', async () => {
+  const { summary, events } = await runGraph(configRows({
     domains: ['aramburo.dev', 'laziness.rocks', 'perfildelinversionistainverplux.com'],
   }), {
     'aramburo.dev': lookupResponse(60),
     'laziness.rocks': { error: 'ETIMEDOUT' },
     'perfildelinversionistainverplux.com': lookupResponse(365),
-  }, { 'aramburo.dev': { error: 'Telegram unavailable' } });
+  }, { 'aramburo.dev': new Error('ntfy unavailable') });
   assert.deepEqual(events, [
-    'lookup:aramburo.dev', 'Telegram - Expiration Alert:aramburo.dev',
-    'lookup:laziness.rocks', 'Telegram - Lookup Error:laziness.rocks',
+    'lookup:aramburo.dev', 'ntfy:aramburo.dev',
+    'lookup:laziness.rocks', 'ntfy:laziness.rocks',
     'lookup:perfildelinversionistainverplux.com',
   ]);
   assert.equal(summary.status, 'partial_error');
@@ -234,11 +324,12 @@ test('the graph processes later domains after lookup and Telegram failures, in o
   assert.equal(summary.expirationAlertsSent, 0);
   assert.equal(summary.errorNotificationsSent, 1);
   assert.equal(summary.results[2].notification.status, 'not_required');
-  assert.ok(summary.results.every((result) => !('chatId' in result) && !('message' in result)));
+  assert.ok(summary.results.every((result) => !('notifications' in result) && !('message' in result)));
+  assert.ok(!JSON.stringify(summary).includes('test-password'));
 });
 
-test('parse-error and successful-alert branches both return to the loop and report a summary', () => {
-  const { summary, events } = runGraph(configRows({ domains: ['aramburo.dev', 'laziness.rocks'] }), {
+test('parse-error and successful-alert branches both return to the loop and report a summary', async () => {
+  const { summary, events } = await runGraph(configRows({ domains: ['aramburo.dev', 'laziness.rocks'] }), {
     'aramburo.dev': { statusCode: 200, data: '<html>No date</html>' },
     'laziness.rocks': lookupResponse(10),
   });
@@ -247,8 +338,8 @@ test('parse-error and successful-alert branches both return to the loop and repo
   assert.equal(summary.expirationAlertsSent, 1);
   assert.equal(summary.errorNotificationsSent, 1);
   assert.equal(summary.notificationFailureCount, 0);
-  assert.equal(events.at(-1), 'Telegram - Expiration Alert:laziness.rocks');
-  const healthy = runGraph(configRows({ domains: ['aramburo.dev'] }), { 'aramburo.dev': lookupResponse(100) });
+  assert.equal(events.at(-1), 'ntfy:laziness.rocks');
+  const healthy = await runGraph(configRows({ domains: ['aramburo.dev'] }), { 'aramburo.dev': lookupResponse(100) });
   assert.equal(healthy.summary.status, 'ok');
 });
 
@@ -262,9 +353,9 @@ test('export settings preserve one daily schedule, sequential looping, and error
   assert.equal(nodes['Get Domain Config'].alwaysOutputData, true);
   assert.equal(nodes['Fetch ICANN Data'].parameters.options.timeout, 30000);
   assert.equal(nodes['Fetch ICANN Data'].parameters.options.response.response.responseFormat, 'text');
-  for (const name of ['Fetch ICANN Data', 'Telegram - Expiration Alert', 'Telegram - Lookup Error']) {
-    assert.equal(nodes[name].onError, 'continueRegularOutput');
-  }
+  assert.equal(nodes['Fetch ICANN Data'].onError, 'continueRegularOutput');
+  assert.ok(workflow.nodes.every((node) => !node.type.endsWith('.telegram')));
+  assert.doesNotMatch(JSON.stringify(workflow), /PERSONAL_TELEGRAM_CHAT_ID|telegramApi/);
   for (const source of Object.values(workflow.connections)) {
     for (const output of source.main) {
       for (const edge of output) assert.ok(nodes[edge.node], `Unknown connection target ${edge.node}`);
